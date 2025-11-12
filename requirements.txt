@@ -2,4 +2,4 @@ streamlit
 oandapyV20
 pandas
 numpy
-
+pytz
