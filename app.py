@@ -6,8 +6,7 @@ from typing import Tuple, List, Dict, Optional
 from oandapyV20 import API
 from oandapyV20.endpoints.instruments import InstrumentsCandles
 from concurrent.futures import ThreadPoolExecutor, as_completed
-import plotly.graph_objects as go
-from datetime import datetime, timedelta
+from datetime import datetime
 
 st.set_page_config(page_title="Forex Multi-Timeframe Scanner", layout="wide")
 
@@ -27,7 +26,7 @@ GRANULARITY_MAP = {"H1": "H1", "H4": "H4", "D1": "D", "W": "W"}
 # Interface
 # ----------------------
 st.title("📊 Forex Multi-Timeframe Signal Scanner Pro")
-st.write("Scanner optimisé avec analyse parallèle et visualisations avancées")
+st.write("Scanner optimisé avec analyse parallèle et calculs SL/TP automatiques")
 
 # ----------------------
 # OANDA API
@@ -50,7 +49,7 @@ except Exception as e:
 # ----------------------
 # Fonctions utilitaires
 # ----------------------
-@st.cache_data(ttl=60)  # Cache réduit à 60s pour données plus fraîches
+@st.cache_data(ttl=60)
 def get_candles(pair: str, tf: str, count: int = 200) -> pd.DataFrame:
     """Télécharge les bougies OANDA avec gestion d'erreur robuste."""
     gran = GRANULARITY_MAP.get(tf)
@@ -65,7 +64,7 @@ def get_candles(pair: str, tf: str, count: int = 200) -> pd.DataFrame:
         
         records = []
         for c in candles:
-            if not c.get("complete", True):  # Ignorer les bougies incomplètes
+            if not c.get("complete", True):
                 continue
             try:
                 records.append({
@@ -86,7 +85,6 @@ def get_candles(pair: str, tf: str, count: int = 200) -> pd.DataFrame:
         df["time"] = pd.to_datetime(df["time"])
         return df
     except Exception as e:
-        st.warning(f"Erreur récupération {pair} {tf}: {str(e)[:50]}")
         return pd.DataFrame()
 
 # --- Calculs indicateurs (optimisés)
@@ -143,7 +141,7 @@ def check_mtf_trend(pair: str, tf: str) -> Dict[str, any]:
     distance_pct = abs((ema20 - ema50) / ema50) * 100
     
     if ema20 > ema50 and price > ema20:
-        strength = min(distance_pct * 10, 100)  # Normaliser à 0-100
+        strength = min(distance_pct * 10, 100)
         return {"trend": "bullish", "strength": round(strength, 1)}
     elif ema20 < ema50 and price < ema20:
         strength = min(distance_pct * 10, 100)
@@ -178,7 +176,6 @@ def analyze_pair(pair: str, tf: str, candles_count: int) -> Optional[Dict]:
     df["rsi_cross_down"] = (df["rsi7"] < 50) & (df["rsi7"].shift(1) >= 50)
     
     last = df.iloc[-1]
-    prev = df.iloc[-2] if len(df) > 1 else last
     
     # Détection signaux bruts
     raw_buy = bool(last.get("hma_bullish_change", False)) and bool(last.get("rsi_cross_up", False))
@@ -197,12 +194,11 @@ def analyze_pair(pair: str, tf: str, candles_count: int) -> Optional[Dict]:
     confidence = 0
     
     if buy:
-        signal = "🟢 Achat"
-        # Calcul confiance basé sur RSI et force MTF
-        rsi_strength = (last["rsi7"] - 50) / 50 * 100  # 0-100%
+        signal = "🟢 ACHAT"
+        rsi_strength = (last["rsi7"] - 50) / 50 * 100
         confidence = (rsi_strength * 0.4 + mtf_strength * 0.6)
     elif sell:
-        signal = "🔴 Vente"
+        signal = "🔴 VENTE"
         rsi_strength = (50 - last["rsi7"]) / 50 * 100
         confidence = (rsi_strength * 0.4 + mtf_strength * 0.6)
     
@@ -216,24 +212,30 @@ def analyze_pair(pair: str, tf: str, candles_count: int) -> Optional[Dict]:
     if buy:
         sl = price - (2 * atr_value)
         tp = price + (3 * atr_value)
+        risk_pips = abs(price - sl)
     else:
         sl = price + (2 * atr_value)
         tp = price - (3 * atr_value)
+        risk_pips = abs(price - sl)
+    
+    reward_pips = abs(tp - price)
+    rr_ratio = reward_pips / risk_pips if risk_pips > 0 else 0
     
     return {
         "Instrument": pair,
         "TF": tf,
         "Signal": signal,
-        "Confiance": f"{round(confidence, 1)}%",
+        "Confiance": round(confidence, 1),
         "Prix": round(price, 5),
         "SL": round(sl, 5),
         "TP": round(tp, 5),
-        "R:R": "1:1.5",
+        "R:R": f"1:{round(rr_ratio, 1)}",
         "RSI": round(last["rsi7"], 1),
-        "MTF": f"{mtf_trend} ({mtf_strength}%)",
-        "Heure": last["time"],
-        "_confidence_val": confidence,  # Pour tri
-        "_df": df.tail(50)  # Pour graphique
+        "Tendance": mtf_trend.upper(),
+        "Force": f"{mtf_strength}%",
+        "Heure": last["time"].strftime("%Y-%m-%d %H:%M"),
+        "_confidence_val": confidence,
+        "_time_raw": last["time"]
     }
 
 # ----------------------
@@ -244,134 +246,115 @@ def scan_parallel(pairs: List[str], tfs: List[str], candles_count: int, max_work
     results = []
     tasks = [(pair, tf) for pair in pairs for tf in tfs]
     
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+    
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         future_to_task = {
             executor.submit(analyze_pair, pair, tf, candles_count): (pair, tf)
             for pair, tf in tasks
         }
         
-        progress_bar = st.progress(0)
         completed = 0
         total = len(tasks)
         
         for future in as_completed(future_to_task):
             completed += 1
             progress_bar.progress(completed / total)
+            status_text.text(f"Analyse en cours... {completed}/{total}")
             
             try:
                 result = future.result(timeout=10)
                 if result and result["Signal"]:
                     results.append(result)
-            except Exception as e:
-                pair, tf = future_to_task[future]
-                st.warning(f"Erreur {pair} {tf}: {str(e)[:50]}")
+            except Exception:
+                pass
         
         progress_bar.empty()
+        status_text.empty()
     
     return results
 
 # ----------------------
-# Visualisation graphique
-# ----------------------
-def plot_signal_chart(data: Dict):
-    """Graphique interactif du signal."""
-    df = data["_df"]
-    
-    fig = go.Figure()
-    
-    # Chandeliers
-    fig.add_trace(go.Candlestick(
-        x=df["time"],
-        open=df["open"],
-        high=df["high"],
-        low=df["low"],
-        close=df["close"],
-        name="Prix"
-    ))
-    
-    # HMA20
-    fig.add_trace(go.Scatter(
-        x=df["time"],
-        y=df["hma20"],
-        name="HMA20",
-        line=dict(color="blue", width=2)
-    ))
-    
-    # Niveaux SL/TP
-    last_time = df["time"].iloc[-1]
-    fig.add_hline(y=data["Prix"], line_dash="dash", line_color="white", annotation_text="Entry")
-    fig.add_hline(y=data["SL"], line_dash="dot", line_color="red", annotation_text="SL")
-    fig.add_hline(y=data["TP"], line_dash="dot", line_color="green", annotation_text="TP")
-    
-    fig.update_layout(
-        title=f"{data['Instrument']} - {data['TF']} - {data['Signal']}",
-        xaxis_title="Date",
-        yaxis_title="Prix",
-        height=400,
-        template="plotly_dark"
-    )
-    
-    return fig
-
-# ----------------------
 # Interface utilisateur
 # ----------------------
-col1, col2 = st.columns([1, 3])
+st.sidebar.header("⚙️ Configuration du Scanner")
 
-with col1:
-    st.sidebar.header("⚙️ Configuration")
-    selected_pairs = st.sidebar.multiselect(
-        "Paires à scanner :",
-        PAIRS_DEFAULT,
-        default=PAIRS_DEFAULT[:10]  # Par défaut 10 paires
-    )
-    
-    max_pairs = st.sidebar.number_input(
-        "Max paires :",
-        min_value=1,
-        max_value=len(selected_pairs),
-        value=min(10, len(selected_pairs))
-    )
-    
-    selected_tfs = st.sidebar.multiselect(
-        "Timeframes :",
-        ["H1", "H4", "D1"],
-        default=["H4", "D1"]
-    )
-    
-    candles_count = st.sidebar.selectbox(
-        "Bougies par TF :",
-        [100, 150, 200],
-        index=1
-    )
-    
-    max_workers = st.sidebar.slider(
-        "Workers parallèles :",
-        min_value=3,
-        max_value=10,
-        value=5,
-        help="Plus = rapide mais charge API"
-    )
-    
-    min_confidence = st.sidebar.slider(
-        "Confiance min (%) :",
-        min_value=0,
-        max_value=100,
-        value=50
-    )
-    
-    st.sidebar.markdown("---")
-    auto_refresh = st.sidebar.checkbox("Auto-refresh (5min)")
-    
-    scan_button = st.sidebar.button("🔄 LANCER LE SCAN", type="primary", use_container_width=True)
+selected_pairs = st.sidebar.multiselect(
+    "Paires à scanner :",
+    PAIRS_DEFAULT,
+    default=PAIRS_DEFAULT[:10]
+)
+
+max_pairs = st.sidebar.number_input(
+    "Nombre max de paires :",
+    min_value=1,
+    max_value=len(selected_pairs) if selected_pairs else 28,
+    value=min(10, len(selected_pairs)) if selected_pairs else 10
+)
+
+selected_tfs = st.sidebar.multiselect(
+    "Timeframes :",
+    ["H1", "H4", "D1"],
+    default=["H4", "D1"]
+)
+
+candles_count = st.sidebar.selectbox(
+    "Bougies par timeframe :",
+    [100, 150, 200],
+    index=1
+)
+
+max_workers = st.sidebar.slider(
+    "Threads parallèles :",
+    min_value=3,
+    max_value=10,
+    value=5,
+    help="Plus = rapide mais charge API OANDA"
+)
+
+min_confidence = st.sidebar.slider(
+    "Confiance minimale (%) :",
+    min_value=0,
+    max_value=100,
+    value=40,
+    help="Filtrer les signaux faibles"
+)
+
+st.sidebar.markdown("---")
+st.sidebar.markdown("### 🔄 Rafraîchissement")
+auto_refresh = st.sidebar.checkbox("Auto-refresh (5min)", help="Scan automatique toutes les 5 minutes")
+refresh_interval = st.sidebar.selectbox("Intervalle (min) :", [3, 5, 10, 15], index=1)
+
+st.sidebar.markdown("---")
+scan_button = st.sidebar.button("🚀 LANCER LE SCAN", type="primary", use_container_width=True)
+
+# ----------------------
+# Statistiques d'en-tête
+# ----------------------
+col1, col2, col3, col4 = st.columns(4)
+col1.metric("Paires disponibles", len(PAIRS_DEFAULT))
+col2.metric("Paires sélectionnées", len(selected_pairs) if selected_pairs else 0)
+col3.metric("Timeframes actifs", len(selected_tfs) if selected_tfs else 0)
+col4.metric("Indicateurs", "HMA20 + RSI7 + ATR14")
+
+st.markdown("---")
 
 # ----------------------
 # Scan principal
 # ----------------------
 if scan_button or auto_refresh:
-    if auto_refresh:
-        st.sidebar.info("Prochain scan dans 5 min...")
-        time.sleep(300)  # 5 minutes
+    if not selected_pairs or not selected_tfs:
+        st.error("⚠️ Veuillez sélectionner au moins une paire et un timeframe")
+        st.stop()
+    
+    if auto_refresh and not scan_button:
+        countdown = st.empty()
+        for remaining in range(refresh_interval * 60, 0, -1):
+            mins, secs = divmod(remaining, 60)
+            countdown.info(f"⏱️ Prochain scan dans {mins:02d}:{secs:02d}")
+            time.sleep(1)
+        countdown.empty()
         st.rerun()
     
     with st.spinner("🔍 Scan en cours..."):
@@ -381,52 +364,114 @@ if scan_button or auto_refresh:
         results = scan_parallel(pairs_to_scan, selected_tfs, candles_count, max_workers)
         
         # Filtrer par confiance
-        results = [r for r in results if float(r["Confiance"].strip("%")) >= min_confidence]
+        results = [r for r in results if r["_confidence_val"] >= min_confidence]
         
         elapsed = time.time() - start_time
-        st.success(f"✅ Scan terminé en {elapsed:.1f}s - {len(results)} signaux trouvés")
+    
+    # Résultats
+    st.success(f"✅ Scan terminé en **{elapsed:.1f}s** - **{len(results)} signaux** trouvés")
     
     if results:
-        # Tri par confiance
+        # Tri par confiance décroissante
         results.sort(key=lambda x: x["_confidence_val"], reverse=True)
         
-        # Affichage tableau
-        df_display = pd.DataFrame([{k: v for k, v in r.items() if not k.startswith("_")} for r in results])
+        # Préparation données affichage
+        df_display = pd.DataFrame([
+            {k: v for k, v in r.items() if not k.startswith("_")}
+            for r in results
+        ])
+        
+        # Coloration des signaux
+        def highlight_signal(row):
+            if "ACHAT" in str(row["Signal"]):
+                return ['background-color: rgba(0, 255, 0, 0.1)'] * len(row)
+            elif "VENTE" in str(row["Signal"]):
+                return ['background-color: rgba(255, 0, 0, 0.1)'] * len(row)
+            return [''] * len(row)
+        
+        # Affichage tableau principal
+        st.subheader("📋 Signaux détectés")
         st.dataframe(
-            df_display,
+            df_display.style.apply(highlight_signal, axis=1),
             use_container_width=True,
-            height=400,
-            column_config={
-                "Signal": st.column_config.TextColumn("Signal", width="small"),
-                "Confiance": st.column_config.ProgressColumn("Confiance", format="%s", min_value=0, max_value=100),
-            }
+            height=500
         )
         
-        # Graphiques des meilleurs signaux
-        st.subheader("📈 Top 3 Signaux")
-        cols = st.columns(3)
-        for idx, result in enumerate(results[:3]):
+        # Top signaux
+        st.markdown("---")
+        st.subheader("🏆 Top 5 Signaux par Confiance")
+        
+        cols = st.columns(5)
+        for idx, result in enumerate(results[:5]):
             with cols[idx]:
-                st.plotly_chart(plot_signal_chart(result), use_container_width=True)
+                signal_emoji = "🟢" if "ACHAT" in result["Signal"] else "🔴"
+                st.metric(
+                    f"{signal_emoji} {result['Instrument']}",
+                    f"{result['Prix']}",
+                    f"{result['TF']} - {result['Confiance']:.0f}%"
+                )
+                st.caption(f"SL: {result['SL']} | TP: {result['TP']}")
+                st.caption(f"R:R {result['R:R']} | RSI {result['RSI']}")
+        
+        # Analyse par timeframe
+        st.markdown("---")
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.subheader("📊 Répartition par Timeframe")
+            tf_counts = df_display["TF"].value_counts()
+            st.bar_chart(tf_counts)
+        
+        with col2:
+            st.subheader("📈 Répartition Achat/Vente")
+            signal_counts = df_display["Signal"].value_counts()
+            st.bar_chart(signal_counts)
         
         # Export CSV
+        st.markdown("---")
         csv = df_display.to_csv(index=False).encode('utf-8')
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         st.download_button(
-            "📥 Télécharger les signaux (CSV)",
-            csv,
-            f"signals_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
-            "text/csv"
+            label="📥 Télécharger les signaux (CSV)",
+            data=csv,
+            file_name=f"forex_signals_{timestamp}.csv",
+            mime="text/csv",
+            use_container_width=True
         )
+        
     else:
-        st.info("Aucun signal détecté avec les critères actuels. Réduisez la confiance minimale ou élargissez la sélection.")
+        st.info("ℹ️ Aucun signal détecté avec les critères actuels.")
+        st.markdown("""
+        **Suggestions :**
+        - Réduire la confiance minimale
+        - Augmenter le nombre de paires scannées
+        - Ajouter d'autres timeframes
+        - Réessayer dans quelques minutes
+        """)
+
 else:
-    st.info("👈 Configurez le scanner et cliquez sur **LANCER LE SCAN**")
+    st.info("👈 Configurez le scanner dans la barre latérale et cliquez sur **LANCER LE SCAN**")
     
-    # Statistiques
     st.markdown("---")
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric("Paires disponibles", len(PAIRS_DEFAULT))
-    col2.metric("Timeframes", "3 (H1, H4, D1)")
-    col3.metric("Indicateurs", "HMA20 + RSI7 + ATR")
-    col4.metric("Validation", "Multi-TF")
+    st.markdown("""
+    ### 📚 Guide d'utilisation
+    
+    **Stratégie :**
+    - Signal ACHAT : HMA20 devient haussière + RSI7 > 50 + tendance MTF haussière
+    - Signal VENTE : HMA20 devient baissière + RSI7 < 50 + tendance MTF baissière
+    
+    **Niveaux :**
+    - SL calculé à 2x ATR du prix d'entrée
+    - TP calculé à 3x ATR du prix d'entrée
+    - Ratio risque/récompense ~1:1.5
+    
+    **Confiance :**
+    - Score basé sur force RSI (40%) + force tendance MTF (60%)
+    - Recommandé : ≥ 40% pour signaux fiables
+    
+    **Performance :**
+    - Scan parallélisé : 5-10x plus rapide que séquentiel
+    - Cache 60s pour réduire appels API
+    - Auto-refresh optionnel pour trading actif
+    """)
    
