@@ -7,6 +7,7 @@ from oandapyV20 import API
 from oandapyV20.endpoints.instruments import InstrumentsCandles
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
+import pytz
 
 st.set_page_config(page_title="Forex Multi-Timeframe Scanner", layout="wide")
 
@@ -330,13 +331,79 @@ st.sidebar.markdown("---")
 scan_button = st.sidebar.button("🚀 LANCER LE SCAN", type="primary", use_container_width=True)
 
 # ----------------------
-# Statistiques d'en-tête
+# Fonction session de marché
 # ----------------------
-col1, col2, col3, col4 = st.columns(4)
+def get_market_session():
+    """Détermine la session de marché active et sa qualité."""
+    from datetime import datetime
+    import pytz
+    
+    # Heure actuelle à Tunis
+    tz_tunis = pytz.timezone('Africa/Tunis')
+    now = datetime.now(tz_tunis)
+    hour = now.hour
+    minute = now.minute
+    current_time = hour + minute / 60
+    
+    # Définition des sessions (heures de Tunis)
+    sessions = {
+        "Tokyo": {"start": 1, "end": 10, "quality": "🟡 Moyenne", "pairs": "JPY", "color": "orange"},
+        "Londres": {"start": 9, "end": 18, "quality": "🟢 Excellente", "pairs": "EUR, GBP", "color": "green"},
+        "New York": {"start": 14, "end": 23, "quality": "🟢 Excellente", "pairs": "USD", "color": "green"},
+        "Overlap": {"start": 14, "end": 18, "quality": "🔥 Maximum", "pairs": "Toutes", "color": "red"}
+    }
+    
+    active_sessions = []
+    best_quality = "🔵 Faible"
+    best_color = "blue"
+    
+    # Vérifier les sessions actives
+    for name, info in sessions.items():
+        if info["start"] <= current_time < info["end"]:
+            active_sessions.append(name)
+            if info["quality"] == "🔥 Maximum":
+                best_quality = info["quality"]
+                best_color = info["color"]
+            elif info["quality"] == "🟢 Excellente" and best_quality != "🔥 Maximum":
+                best_quality = info["quality"]
+                best_color = info["color"]
+            elif info["quality"] == "🟡 Moyenne" and best_quality == "🔵 Faible":
+                best_quality = info["quality"]
+                best_color = info["color"]
+    
+    if not active_sessions:
+        best_quality = "🔵 Faible"
+        best_color = "blue"
+        active_sessions = ["Marché calme"]
+    
+    return {
+        "sessions": ", ".join(active_sessions),
+        "quality": best_quality,
+        "color": best_color,
+        "hour": now.strftime("%H:%M")
+    }
+
+# ----------------------
+# Statistiques d'en-tête avec indicateur de session
+# ----------------------
+market_info = get_market_session()
+
+# Alerte session
+if market_info["quality"] == "🔥 Maximum":
+    st.success(f"⚡ **SESSION OPTIMALE ACTIVE** - {market_info['sessions']} - Qualité: {market_info['quality']}")
+elif market_info["quality"] == "🟢 Excellente":
+    st.info(f"✅ **Session active** - {market_info['sessions']} - Qualité: {market_info['quality']}")
+elif market_info["quality"] == "🟡 Moyenne":
+    st.warning(f"⏰ **Session modérée** - {market_info['sessions']} - Qualité: {market_info['quality']}")
+else:
+    st.error(f"💤 **Marché calme** - Peu de volatilité attendue - Qualité: {market_info['quality']}")
+
+col1, col2, col3, col4, col5 = st.columns(5)
 col1.metric("Paires disponibles", len(PAIRS_DEFAULT))
 col2.metric("Paires sélectionnées", len(selected_pairs) if selected_pairs else 0)
 col3.metric("Timeframes actifs", len(selected_tfs) if selected_tfs else 0)
 col4.metric("Indicateurs", "HMA20 + RSI7 + ATR14")
+col5.metric("Heure Tunis", market_info["hour"], market_info["sessions"])
 
 st.markdown("---")
 
@@ -473,5 +540,11 @@ else:
     - Scan parallélisé : 5-10x plus rapide que séquentiel
     - Cache 60s pour réduire appels API
     - Auto-refresh optionnel pour trading actif
+    
+    **⏰ Meilleures heures de trading (Tunis) :**
+    - 🔥 **14h-18h** : Overlap Londres-NY (OPTIMAL)
+    - 🟢 **9h-18h** : Session Londres
+    - 🟢 **14h-23h** : Session New York
+    - 🟡 **1h-10h** : Session Tokyo (JPY uniquement)
+    - 🔵 **23h-1h** : Marché calme (éviter)
     """)
-   
