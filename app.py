@@ -1,3 +1,4 @@
+import streamlit as st
 import oandapyV20
 from oandapyV20.endpoints import instruments
 import pandas as pd
