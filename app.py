@@ -327,66 +327,6 @@ def scan_parallel(pairs: List[str], tfs: List[str], candles_count: int, max_work
     return results
 
 # ----------------------
-# Interface utilisateur
-# ----------------------
-st.sidebar.header("⚙️ Configuration du Scanner")
-
-# Scanner TOUTES les 28 paires par défaut (masqué mais modifiable)
-with st.sidebar.expander("🔧 Filtrer les paires (optionnel)", expanded=False):
-    selected_pairs = st.multiselect(
-        "Désélectionner les paires à ignorer :",
-        PAIRS_DEFAULT,
-        default=PAIRS_DEFAULT
-    )
-
-# Si aucune paire sélectionnée, prendre toutes par défaut
-if not selected_pairs:
-    selected_pairs = PAIRS_DEFAULT
-
-max_pairs = len(selected_pairs)  # Scanner toutes les paires sélectionnées
-
-# Timeframes H1, H4, D1 par défaut (tous sélectionnés)
-selected_tfs = st.sidebar.multiselect(
-    "Timeframes :",
-    ["H1", "H4", "D1"],
-    default=["H1", "H4", "D1"],
-    help="H1 validé par H4 | H4 validé par D1 | D1 validé par W"
-)
-
-candles_count = st.sidebar.selectbox(
-    "Bougies par timeframe :",
-    [100, 150, 200],
-    index=1
-)
-
-max_workers = st.sidebar.slider(
-    "Threads parallèles :",
-    min_value=3,
-    max_value=10,
-    value=5,
-    help="Plus = rapide mais charge API OANDA"
-)
-
-min_confidence = st.sidebar.slider(
-    "Confiance minimale (%) :",
-    min_value=0,
-    max_value=100,
-    value=20,  # Réduit de 40% à 20% pour voir plus de signaux
-    help="Filtrer les signaux faibles - Réduire pour voir plus de signaux"
-)
-
-st.sidebar.markdown("---")
-st.sidebar.markdown("### 🔄 Rafraîchissement")
-auto_refresh = st.sidebar.checkbox("Auto-refresh (5min)", help="Scan automatique toutes les 5 minutes")
-refresh_interval = st.sidebar.selectbox("Intervalle (min) :", [3, 5, 10, 15], index=1)
-
-st.sidebar.markdown("---")
-scan_button = st.sidebar.button("🚀 LANCER LE SCAN", type="primary", use_container_width=True)
-
-# Définir max_candles_ago AVANT l'utilisation
-max_candles_ago = freshness_map.get(signal_freshness, 2)
-
-# ----------------------
 # Fonction session de marché
 # ----------------------
 def get_market_session():
@@ -440,6 +380,71 @@ def get_market_session():
     }
 
 # ----------------------
+# Interface utilisateur
+# ----------------------
+st.sidebar.header("⚙️ Configuration du Scanner")
+
+# Scanner TOUTES les 28 paires par défaut (masqué mais modifiable)
+with st.sidebar.expander("🔧 Filtrer les paires (optionnel)", expanded=False):
+    selected_pairs = st.multiselect(
+        "Désélectionner les paires à ignorer :",
+        PAIRS_DEFAULT,
+        default=PAIRS_DEFAULT
+    )
+
+# Si aucune paire sélectionnée, prendre toutes par défaut
+if not selected_pairs:
+    selected_pairs = PAIRS_DEFAULT
+
+# Timeframes H1, H4, D1 par défaut (tous sélectionnés)
+selected_tfs = st.sidebar.multiselect(
+    "Timeframes :",
+    ["H1", "H4", "D1"],
+    default=["H1", "H4", "D1"],
+    help="H1 validé par H4 | H4 validé par D1 | D1 validé par W"
+)
+
+candles_count = st.sidebar.selectbox(
+    "Bougies par timeframe :",
+    [100, 150, 200],
+    index=1
+)
+
+max_workers = st.sidebar.slider(
+    "Threads parallèles :",
+    min_value=3,
+    max_value=10,
+    value=5,
+    help="Plus = rapide mais charge API OANDA"
+)
+
+min_confidence = st.sidebar.slider(
+    "Confiance minimale (%) :",
+    min_value=0,
+    max_value=100,
+    value=20,
+    help="Filtrer les signaux faibles - Réduire pour voir plus de signaux"
+)
+
+st.sidebar.markdown("---")
+st.sidebar.markdown("### ⏱️ Fraîcheur des signaux")
+
+signal_freshness = st.sidebar.selectbox(
+    "Ne garder que les signaux de :",
+    ["Dernière bougie uniquement", "2 dernières bougies", "3 dernières bougies", "Toutes les bougies"],
+    index=1,
+    help="Filtrer les signaux trop anciens"
+)
+
+st.sidebar.markdown("---")
+st.sidebar.markdown("### 🔄 Rafraîchissement")
+auto_refresh = st.sidebar.checkbox("Auto-refresh (5min)", help="Scan automatique toutes les 5 minutes")
+refresh_interval = st.sidebar.selectbox("Intervalle (min) :", [3, 5, 10, 15], index=1)
+
+st.sidebar.markdown("---")
+scan_button = st.sidebar.button("🚀 LANCER LE SCAN", type="primary", use_container_width=True)
+
+# ----------------------
 # Statistiques d'en-tête avec indicateur de session
 # ----------------------
 market_info = get_market_session()
@@ -491,7 +496,7 @@ if scan_button or auto_refresh:
     
     with st.spinner("🔍 Scan en cours..."):
         start_time = time.time()
-        pairs_to_scan = selected_pairs  # Scanner TOUTES les paires sélectionnées
+        pairs_to_scan = selected_pairs
         
         results = scan_parallel(pairs_to_scan, selected_tfs, candles_count, max_workers, max_candles_ago)
         
@@ -549,8 +554,11 @@ if scan_button or auto_refresh:
         st.markdown("---")
         st.subheader("🏆 Top 5 Signaux par Confiance")
         
+        # Trier par confiance pour le top 5
+        results_by_conf = sorted(results, key=lambda x: x["_confidence_val"], reverse=True)
+        
         cols = st.columns(5)
-        for idx, result in enumerate(results[:5]):
+        for idx, result in enumerate(results_by_conf[:5]):
             with cols[idx]:
                 signal_emoji = "🟢" if "ACHAT" in result["Signal"] else "🔴"
                 st.metric(
@@ -572,7 +580,9 @@ if scan_button or auto_refresh:
         
         with col2:
             st.subheader("📈 Répartition Achat/Vente")
-            signal_counts = df_display["Signal"].value_counts()
+            # Nettoyer les étoiles pour le comptage
+            signal_clean = df_display["Signal"].str.replace("⭐ ", "")
+            signal_counts = signal_clean.value_counts()
             st.bar_chart(signal_counts)
         
         # Export CSV
@@ -633,7 +643,7 @@ else:
     
     **Confiance :**
     - Score basé sur force RSI (40%) + force tendance MTF (60%)
-    - Recommandé : ≥ 40% pour signaux fiables
+    - Recommandé : ≥ 20% pour signaux fiables
     
     **Performance :**
     - Scan parallélisé : 5-10x plus rapide que séquentiel
@@ -646,4 +656,10 @@ else:
     - 🟢 **14h-23h** : Session New York
     - 🟡 **1h-10h** : Session Tokyo (JPY uniquement)
     - 🔵 **23h-1h** : Marché calme (éviter)
+    
+    **⏱️ Fraîcheur des signaux :**
+    - **Dernière bougie** : Signaux ultra-frais uniquement
+    - **2 dernières bougies** : Équilibre fraîcheur/opportunités (recommandé)
+    - **3 dernières bougies** : Plus tolérant
+    - **Toutes les bougies** : Voir l'historique complet
     """)
