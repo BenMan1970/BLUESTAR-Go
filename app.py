@@ -187,23 +187,33 @@ def analyze_pair(pair: str, tf: str, candles_count: int) -> Optional[Dict]:
     df["hma_up"] = df["hma20"] > df["hma20"].shift(1)
     
     # ============================================
-    # CRITÈRE 1 : HMA change de couleur MAINTENANT
+    # CRITÈRE 1 : HMA change de couleur (ou vient de changer récemment)
     # ============================================
     last = df.iloc[-1]
     prev = df.iloc[-2]
+    prev2 = df.iloc[-3] if len(df) > 2 else prev
     
-    # Changement HMA sur la DERNIÈRE bougie uniquement
-    hma_turned_bullish = last["hma_up"] and not prev["hma_up"]
-    hma_turned_bearish = not last["hma_up"] and prev["hma_up"]
+    # Changement HMA sur la dernière OU avant-dernière bougie (tolérance)
+    hma_turned_bullish = (last["hma_up"] and not prev["hma_up"]) or \
+                         (prev["hma_up"] and not prev2["hma_up"] and last["hma_up"])
+    
+    hma_turned_bearish = (not last["hma_up"] and prev["hma_up"]) or \
+                         (not prev["hma_up"] and prev2["hma_up"] and not last["hma_up"])
     
     # ============================================
-    # CRITÈRE 2 : RSI croise 50 (légèrement)
+    # CRITÈRE 2 : RSI croise 50 (ou vient de croiser)
     # ============================================
     # ACHAT : RSI croise 50 vers le HAUT (au-dessus de 50)
     # VENTE : RSI croise 50 vers le BAS (en-dessous de 50)
-    rsi_crossed_up = (prev["rsi7"] <= 50 and last["rsi7"] > 50)
     
-    rsi_crossed_down = (prev["rsi7"] >= 50 and last["rsi7"] < 50)
+    # Croisement sur dernière ou avant-dernière bougie
+    rsi_crossed_up_now = (prev["rsi7"] <= 50 and last["rsi7"] > 50)
+    rsi_crossed_up_prev = (prev2["rsi7"] <= 50 and prev["rsi7"] > 50 and last["rsi7"] > 50)
+    rsi_crossed_up = rsi_crossed_up_now or rsi_crossed_up_prev
+    
+    rsi_crossed_down_now = (prev["rsi7"] >= 50 and last["rsi7"] < 50)
+    rsi_crossed_down_prev = (prev2["rsi7"] >= 50 and prev["rsi7"] < 50 and last["rsi7"] < 50)
+    rsi_crossed_down = rsi_crossed_down_now or rsi_crossed_down_prev
     
     # Distance au croisement (pour mesurer "légèrement")
     rsi_distance = abs(last["rsi7"] - 50)
@@ -421,9 +431,9 @@ min_confidence = st.sidebar.slider(
 # Filtre de fraîcheur des signaux
 max_age_minutes = st.sidebar.slider(
     "Signaux récents uniquement (min) :",
-    min_value=5,
-    max_value=60,
-    value=15,
+    min_value=15,
+    max_value=120,
+    value=60,
     help="Ignorer les signaux plus vieux que X minutes"
 )
 
@@ -492,13 +502,22 @@ if scan_button or auto_refresh:
     st.success(f"✅ Scan terminé en **{elapsed:.1f}s** - **{total_analyzed} analyses** - **{len(results)} signaux instantanés**")
     
     if results:
-        # Tri par fraîcheur (plus récent en premier)
-        results.sort(key=lambda x: x["_minutes_ago"])
+        # Tri par timeframe puis par fraîcheur
+        tf_order = {"H1": 1, "H4": 2, "D1": 3}
+        results.sort(key=lambda x: (tf_order.get(x["TF"], 99), x["_minutes_ago"]))
         
-        # Marqueur pour signaux très récents (< 5 min)
+        # Identifier le signal le plus récent PAR TIMEFRAME
+        most_recent_by_tf = {}
         for result in results:
-            if result["_minutes_ago"] <= 5:
-                result["Signal"] = "⚡ " + result["Signal"]
+            tf = result["TF"]
+            if tf not in most_recent_by_tf or result["_minutes_ago"] < most_recent_by_tf[tf]["_minutes_ago"]:
+                most_recent_by_tf[tf] = result
+        
+        # Marqueur étoile UNIQUEMENT pour le plus récent de chaque TF
+        for result in results:
+            if result["Instrument"] == most_recent_by_tf[result["TF"]]["Instrument"] and \
+               result["TF"] == most_recent_by_tf[result["TF"]]["TF"]:
+                result["Signal"] = "⭐ " + result["Signal"]
         
         df_display = pd.DataFrame([
             {k: v for k, v in r.items() if not k.startswith("_")}
@@ -555,11 +574,11 @@ if scan_button or auto_refresh:
             st.markdown(f"""
             **Critères STRICTS pour un signal instantané :**
             
-            ✅ **1. HMA20 change de couleur** sur la DERNIÈRE bougie :
+            ✅ **1. HMA20 change de couleur** (dernière ou avant-dernière bougie) :
             - Rouge → Vert = Signal ACHAT
             - Vert → Rouge = Signal VENTE
             
-            ✅ **2. RSI7 croise 50** (sur les 2 dernières bougies) :
+            ✅ **2. RSI7 croise 50** (dernière ou avant-dernière bougie) :
             - ACHAT : RSI passe de ≤50 à >50 (au-dessus)
             - VENTE : RSI passe de ≥50 à <50 (en-dessous)
             
@@ -572,11 +591,12 @@ if scan_button or auto_refresh:
             
             **Actions suggérées :**
             - 🔽 Réduire la confiance minimale à 0%
-            - ⏰ Augmenter la fraîcheur à 30-60 minutes
+            - ⏰ La fraîcheur est déjà à {max_age_minutes} min
             - 🔄 Attendre la prochaine bougie (signaux apparaissent à la clôture)
             - 📊 Vérifier que vous êtes dans une session active
+            - 🌍 Le marché peut être en consolidation (pas de tendance claire)
             
-            **Note :** Ces signaux sont RARES car les 3 critères doivent être simultanés !
+            **Note :** Ces signaux nécessitent l'alignement des 3 critères dans une fenêtre de 2 bougies.
             """)
 
 else:
@@ -611,6 +631,7 @@ else:
     **💡 Conseils d'utilisation :**
     - Auto-refresh 2-3 min pour capturer les signaux en temps réel
     - Vérifier signaux sur TradingView avant d'entrer en position
-    - Privilégier les signaux avec ⚡ (très récents, < 5 min)
-    - Augmenter la fraîcheur si vous voulez voir l'historique récent
+    - Les signaux ⭐ sont les plus récents de chaque timeframe
+    - Réduire la confiance à 0% si aucun signal n'apparaît
+    - Les critères sont stricts : HMA + RSI + MTF doivent s'aligner dans une fenêtre de 2 bougies
     """)
