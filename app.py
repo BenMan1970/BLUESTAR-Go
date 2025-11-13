@@ -165,8 +165,15 @@ def check_mtf_trend(pair: str, tf: str) -> Dict[str, any]:
 # ----------------------
 # Analyse d'une paire (optimisée)
 # ----------------------
-def analyze_pair(pair: str, tf: str, candles_count: int) -> Optional[Dict]:
-    """Analyse complète avec gestion d'erreur robuste et logique assouplie."""
+def analyze_pair(pair: str, tf: str, candles_count: int, max_candles_back: int = 3) -> Optional[Dict]:
+    """Analyse complète avec gestion d'erreur robuste et filtre de fraîcheur.
+    
+    Args:
+        pair: Paire forex à analyser
+        tf: Timeframe (H1, H4, D1)
+        candles_count: Nombre de bougies historiques à télécharger
+        max_candles_back: Nombre max de bougies en arrière pour détecter signaux (1=dernière uniquement)
+    """
     df = get_candles(pair, tf, count=candles_count)
     if df.empty or len(df) < 30:
         return None
@@ -181,37 +188,35 @@ def analyze_pair(pair: str, tf: str, candles_count: int) -> Optional[Dict]:
     # Signaux HMA - Direction actuelle
     df["hma_up"] = df["hma20"] > df["hma20"].shift(1)
     
-    # CHANGEMENT DE LOGIQUE : On vérifie les 3 dernières bougies
-    # pour ne pas rater les signaux qui viennent de se former
-    last3 = df.tail(3)
+    # IMPORTANT : Ne regarder que les N dernières bougies selon le paramètre
+    last_n = df.tail(max_candles_back) if max_candles_back < 999 else df.tail(3)
     
-    # Vérifier si HMA a changé récemment (dernières 3 bougies)
+    # Vérifier si HMA a changé dans la fenêtre autorisée
     hma_became_bullish = False
     hma_became_bearish = False
     
-    for i in range(len(last3) - 1):
-        curr_up = last3.iloc[i+1]["hma_up"]
-        prev_up = last3.iloc[i]["hma_up"]
+    for i in range(len(last_n) - 1):
+        curr_up = last_n.iloc[i+1]["hma_up"]
+        prev_up = last_n.iloc[i]["hma_up"]
         if curr_up and not prev_up:
             hma_became_bullish = True
         if not curr_up and prev_up:
             hma_became_bearish = True
     
     last = df.iloc[-1]
-    prev = df.iloc[-2] if len(df) > 1 else last
     
-    # RSI - Vérifier position actuelle et croisement récent
+    # RSI - Vérifier position actuelle
     rsi_bullish = last["rsi7"] > 50
     rsi_bearish = last["rsi7"] < 50
     
-    # Vérifier croisement RSI dans les 3 dernières bougies
+    # Vérifier croisement RSI dans la fenêtre autorisée
     rsi_crossed_up_recently = any(
-        (last3.iloc[i]["rsi7"] > 50) and (last3.iloc[i-1]["rsi7"] <= 50)
-        for i in range(1, len(last3))
+        (last_n.iloc[i]["rsi7"] > 50) and (last_n.iloc[i-1]["rsi7"] <= 50)
+        for i in range(1, len(last_n))
     )
     rsi_crossed_down_recently = any(
-        (last3.iloc[i]["rsi7"] < 50) and (last3.iloc[i-1]["rsi7"] >= 50)
-        for i in range(1, len(last3))
+        (last_n.iloc[i]["rsi7"] < 50) and (last_n.iloc[i-1]["rsi7"] >= 50)
+        for i in range(1, len(last_n))
     )
     
     # Validation MTF
@@ -219,12 +224,7 @@ def analyze_pair(pair: str, tf: str, candles_count: int) -> Optional[Dict]:
     mtf_trend = mtf_info["trend"]
     mtf_strength = mtf_info["strength"]
     
-    # LOGIQUE ASSOUPLIE : 
-    # Signal ACHAT si :
-    # - HMA est devenue haussière récemment OU HMA est haussière actuellement
-    # - ET RSI > 50 (même sans croisement strict)
-    # - ET MTF aligné
-    
+    # Logique de signal
     raw_buy = (hma_became_bullish or last["hma_up"]) and rsi_bullish
     raw_sell = (hma_became_bearish or not last["hma_up"]) and rsi_bearish
     
@@ -243,7 +243,7 @@ def analyze_pair(pair: str, tf: str, candles_count: int) -> Optional[Dict]:
         rsi_strength = (last["rsi7"] - 50) / 50 * 100
         confidence = (rsi_strength * 0.4 + mtf_strength * 0.6)
         if has_rsi_confirmation:
-            confidence *= 1.2  # Bonus si croisement RSI confirmé
+            confidence *= 1.2
     elif sell:
         signal = "🔴 VENTE"
         rsi_strength = (50 - last["rsi7"]) / 50 * 100
@@ -251,7 +251,7 @@ def analyze_pair(pair: str, tf: str, candles_count: int) -> Optional[Dict]:
         if has_rsi_confirmation:
             confidence *= 1.2
     
-    confidence = min(confidence, 100)  # Plafonner à 100%
+    confidence = min(confidence, 100)
     
     if signal is None:
         return None
@@ -292,7 +292,7 @@ def analyze_pair(pair: str, tf: str, candles_count: int) -> Optional[Dict]:
 # ----------------------
 # Scan parallélisé
 # ----------------------
-def scan_parallel(pairs: List[str], tfs: List[str], candles_count: int, max_workers: int = 5) -> List[Dict]:
+def scan_parallel(pairs: List[str], tfs: List[str], candles_count: int, max_workers: int = 5, max_candles_back: int = 3) -> List[Dict]:
     """Scan parallélisé pour performances optimales."""
     results = []
     tasks = [(pair, tf) for pair in pairs for tf in tfs]
@@ -302,7 +302,7 @@ def scan_parallel(pairs: List[str], tfs: List[str], candles_count: int, max_work
     
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         future_to_task = {
-            executor.submit(analyze_pair, pair, tf, candles_count): (pair, tf)
+            executor.submit(analyze_pair, pair, tf, candles_count, max_candles_back): (pair, tf)
             for pair, tf in tasks
         }
         
@@ -481,7 +481,7 @@ if scan_button or auto_refresh:
         start_time = time.time()
         pairs_to_scan = selected_pairs  # Scanner TOUTES les paires sélectionnées
         
-        results = scan_parallel(pairs_to_scan, selected_tfs, candles_count, max_workers)
+        results = scan_parallel(pairs_to_scan, selected_tfs, candles_count, max_workers, max_candles_ago)
         
         # Filtrer par confiance
         results = [r for r in results if r["_confidence_val"] >= min_confidence]
@@ -490,7 +490,8 @@ if scan_button or auto_refresh:
     
     # Résultats avec statistiques détaillées
     total_analyzed = len(pairs_to_scan) * len(selected_tfs)
-    st.success(f"✅ Scan terminé en **{elapsed:.1f}s** - **{total_analyzed} analyses** - **{len(results)} signaux** (confiance ≥ {min_confidence}%)")
+    freshness_text = signal_freshness.lower()
+    st.success(f"✅ Scan terminé en **{elapsed:.1f}s** - **{total_analyzed} analyses** - **{len(results)} signaux** ({freshness_text}, confiance ≥ {min_confidence}%)")
     
     if results:
         # Tri personnalisé : H1 -> H4 -> D1, puis par date décroissante dans chaque TF
@@ -634,4 +635,4 @@ else:
     - 🟡 **1h-10h** : Session Tokyo (JPY uniquement)
     - 🔵 **23h-1h** : Marché calme (éviter)
     """)
-    
+  
