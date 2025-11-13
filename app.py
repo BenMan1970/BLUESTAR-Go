@@ -125,9 +125,21 @@ def atr(df: pd.DataFrame, length: int = 14) -> pd.Series:
 
 @st.cache_data(ttl=120)
 def check_mtf_trend(pair: str, tf: str) -> Dict[str, any]:
-    """Analyse tendance multi-timeframe avec force du signal."""
-    map_higher = {"H1": "H4", "H4": "D1", "D1": "W"}
-    higher = map_higher.get(tf, "H4")
+    """Analyse tendance multi-timeframe avec force du signal.
+    H1 → validé par H4
+    H4 → validé par D1  
+    D1 → validé par W
+    """
+    # Mapping strict des validations MTF
+    map_higher = {
+        "H1": "H4",   # H1 validé par H4
+        "H4": "D1",   # H4 validé par D1
+        "D1": "W"     # D1 validé par Weekly
+    }
+    
+    higher = map_higher.get(tf)
+    if not higher:
+        return {"trend": "neutral", "strength": 0}
     
     df = get_candles(pair, higher, count=100)
     if df.empty or len(df) < 50:
@@ -281,23 +293,26 @@ def scan_parallel(pairs: List[str], tfs: List[str], candles_count: int, max_work
 # ----------------------
 st.sidebar.header("⚙️ Configuration du Scanner")
 
-selected_pairs = st.sidebar.multiselect(
-    "Paires à scanner :",
-    PAIRS_DEFAULT,
-    default=PAIRS_DEFAULT[:10]
-)
+# Scanner TOUTES les 28 paires par défaut (masqué mais modifiable)
+with st.sidebar.expander("🔧 Filtrer les paires (optionnel)", expanded=False):
+    selected_pairs = st.multiselect(
+        "Désélectionner les paires à ignorer :",
+        PAIRS_DEFAULT,
+        default=PAIRS_DEFAULT
+    )
 
-max_pairs = st.sidebar.number_input(
-    "Nombre max de paires :",
-    min_value=1,
-    max_value=len(selected_pairs) if selected_pairs else 28,
-    value=min(10, len(selected_pairs)) if selected_pairs else 10
-)
+# Si aucune paire sélectionnée, prendre toutes par défaut
+if not selected_pairs:
+    selected_pairs = PAIRS_DEFAULT
 
+max_pairs = len(selected_pairs)  # Scanner toutes les paires sélectionnées
+
+# Timeframes H1, H4, D1 par défaut (tous sélectionnés)
 selected_tfs = st.sidebar.multiselect(
     "Timeframes :",
     ["H1", "H4", "D1"],
-    default=["H4", "D1"]
+    default=["H1", "H4", "D1"],
+    help="H1 validé par H4 | H4 validé par D1 | D1 validé par W"
 )
 
 candles_count = st.sidebar.selectbox(
@@ -399,9 +414,9 @@ else:
     st.error(f"💤 **Marché calme** - Peu de volatilité attendue - Qualité: {market_info['quality']}")
 
 col1, col2, col3, col4, col5 = st.columns(5)
-col1.metric("Paires disponibles", len(PAIRS_DEFAULT))
-col2.metric("Paires sélectionnées", len(selected_pairs) if selected_pairs else 0)
-col3.metric("Timeframes actifs", len(selected_tfs) if selected_tfs else 0)
+col1.metric("Paires scannées", len(selected_pairs) if selected_pairs else 28)
+col2.metric("Timeframes", f"{len(selected_tfs) if selected_tfs else 0}/3")
+col3.metric("Validations MTF", "H1→H4 | H4→D1 | D1→W")
 col4.metric("Indicateurs", "HMA20 + RSI7 + ATR14")
 col5.metric("Heure Tunis", market_info["hour"], market_info["sessions"])
 
@@ -426,7 +441,7 @@ if scan_button or auto_refresh:
     
     with st.spinner("🔍 Scan en cours..."):
         start_time = time.time()
-        pairs_to_scan = selected_pairs[:max_pairs]
+        pairs_to_scan = selected_pairs  # Scanner TOUTES les paires sélectionnées
         
         results = scan_parallel(pairs_to_scan, selected_tfs, candles_count, max_workers)
         
@@ -548,3 +563,5 @@ else:
     - 🟡 **1h-10h** : Session Tokyo (JPY uniquement)
     - 🔵 **23h-1h** : Marché calme (éviter)
     """)
+    
+  
