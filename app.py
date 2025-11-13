@@ -166,7 +166,7 @@ def check_mtf_trend(pair: str, tf: str) -> Dict[str, any]:
 # Analyse d'une paire (optimisée)
 # ----------------------
 def analyze_pair(pair: str, tf: str, candles_count: int) -> Optional[Dict]:
-    """Analyse complète avec gestion d'erreur robuste."""
+    """Analyse complète avec gestion d'erreur robuste et logique assouplie."""
     df = get_candles(pair, tf, count=candles_count)
     if df.empty or len(df) < 30:
         return None
@@ -177,29 +177,61 @@ def analyze_pair(pair: str, tf: str, candles_count: int) -> Optional[Dict]:
     df["hma20"] = hma(df["close"], 20)
     df["rsi7"] = rsi(df["close"], 7)
     df["atr14"] = atr(df, 14)
-    df["ema50"] = df["close"].ewm(span=50, adjust=False).mean()
     
-    # Signaux HMA
+    # Signaux HMA - Direction actuelle
     df["hma_up"] = df["hma20"] > df["hma20"].shift(1)
-    df["hma_bullish_change"] = df["hma_up"] & (~df["hma_up"].shift(1).fillna(False))
-    df["hma_bearish_change"] = (~df["hma_up"]) & (df["hma_up"].shift(1).fillna(False))
     
-    # Signaux RSI
-    df["rsi_cross_up"] = (df["rsi7"] > 50) & (df["rsi7"].shift(1) <= 50)
-    df["rsi_cross_down"] = (df["rsi7"] < 50) & (df["rsi7"].shift(1) >= 50)
+    # CHANGEMENT DE LOGIQUE : On vérifie les 3 dernières bougies
+    # pour ne pas rater les signaux qui viennent de se former
+    last3 = df.tail(3)
+    
+    # Vérifier si HMA a changé récemment (dernières 3 bougies)
+    hma_became_bullish = False
+    hma_became_bearish = False
+    
+    for i in range(len(last3) - 1):
+        curr_up = last3.iloc[i+1]["hma_up"]
+        prev_up = last3.iloc[i]["hma_up"]
+        if curr_up and not prev_up:
+            hma_became_bullish = True
+        if not curr_up and prev_up:
+            hma_became_bearish = True
     
     last = df.iloc[-1]
+    prev = df.iloc[-2] if len(df) > 1 else last
     
-    # Détection signaux bruts
-    raw_buy = bool(last.get("hma_bullish_change", False)) and bool(last.get("rsi_cross_up", False))
-    raw_sell = bool(last.get("hma_bearish_change", False)) and bool(last.get("rsi_cross_down", False))
+    # RSI - Vérifier position actuelle et croisement récent
+    rsi_bullish = last["rsi7"] > 50
+    rsi_bearish = last["rsi7"] < 50
+    
+    # Vérifier croisement RSI dans les 3 dernières bougies
+    rsi_crossed_up_recently = any(
+        (last3.iloc[i]["rsi7"] > 50) and (last3.iloc[i-1]["rsi7"] <= 50)
+        for i in range(1, len(last3))
+    )
+    rsi_crossed_down_recently = any(
+        (last3.iloc[i]["rsi7"] < 50) and (last3.iloc[i-1]["rsi7"] >= 50)
+        for i in range(1, len(last3))
+    )
     
     # Validation MTF
     mtf_info = check_mtf_trend(pair, tf)
     mtf_trend = mtf_info["trend"]
     mtf_strength = mtf_info["strength"]
     
-    # Signaux validés
+    # LOGIQUE ASSOUPLIE : 
+    # Signal ACHAT si :
+    # - HMA est devenue haussière récemment OU HMA est haussière actuellement
+    # - ET RSI > 50 (même sans croisement strict)
+    # - ET MTF aligné
+    
+    raw_buy = (hma_became_bullish or last["hma_up"]) and rsi_bullish
+    raw_sell = (hma_became_bearish or not last["hma_up"]) and rsi_bearish
+    
+    # Bonus de confiance si croisement RSI récent
+    has_rsi_confirmation = rsi_crossed_up_recently or rsi_crossed_down_recently
+    
+    # Signaux validés avec MTF
     buy = raw_buy and mtf_trend == "bullish"
     sell = raw_sell and mtf_trend == "bearish"
     
@@ -210,10 +242,16 @@ def analyze_pair(pair: str, tf: str, candles_count: int) -> Optional[Dict]:
         signal = "🟢 ACHAT"
         rsi_strength = (last["rsi7"] - 50) / 50 * 100
         confidence = (rsi_strength * 0.4 + mtf_strength * 0.6)
+        if has_rsi_confirmation:
+            confidence *= 1.2  # Bonus si croisement RSI confirmé
     elif sell:
         signal = "🔴 VENTE"
         rsi_strength = (50 - last["rsi7"]) / 50 * 100
         confidence = (rsi_strength * 0.4 + mtf_strength * 0.6)
+        if has_rsi_confirmation:
+            confidence *= 1.2
+    
+    confidence = min(confidence, 100)  # Plafonner à 100%
     
     if signal is None:
         return None
@@ -333,8 +371,8 @@ min_confidence = st.sidebar.slider(
     "Confiance minimale (%) :",
     min_value=0,
     max_value=100,
-    value=40,
-    help="Filtrer les signaux faibles"
+    value=20,  # Réduit de 40% à 20% pour voir plus de signaux
+    help="Filtrer les signaux faibles - Réduire pour voir plus de signaux"
 )
 
 st.sidebar.markdown("---")
@@ -450,8 +488,9 @@ if scan_button or auto_refresh:
         
         elapsed = time.time() - start_time
     
-    # Résultats
-    st.success(f"✅ Scan terminé en **{elapsed:.1f}s** - **{len(results)} signaux** trouvés")
+    # Résultats avec statistiques détaillées
+    total_analyzed = len(pairs_to_scan) * len(selected_tfs)
+    st.success(f"✅ Scan terminé en **{elapsed:.1f}s** - **{total_analyzed} analyses** - **{len(results)} signaux** (confiance ≥ {min_confidence}%)")
     
     if results:
         # Tri par confiance décroissante
@@ -523,12 +562,30 @@ if scan_button or auto_refresh:
         
     else:
         st.info("ℹ️ Aucun signal détecté avec les critères actuels.")
+        
+        # Mode debug pour comprendre pourquoi
+        with st.expander("🔍 Diagnostic - Pourquoi aucun signal ?"):
+            st.markdown("""
+            **Critères requis pour un signal :**
+            1. ✅ HMA20 devient haussière/baissière (ou est déjà dans cette direction)
+            2. ✅ RSI7 au-dessus/en-dessous de 50
+            3. ✅ Tendance MTF alignée (H1→H4, H4→D1, D1→W)
+            4. ✅ Confiance ≥ seuil défini
+            
+            **Actions à essayer :**
+            - 🔽 Réduire la **confiance minimale** à 0% (voir TOUS les signaux)
+            - 🔄 Attendre la prochaine bougie (les signaux apparaissent à la clôture)
+            - ⏰ Vérifier que vous êtes dans une session active (Londres/NY)
+            - 📊 Les marchés peuvent être en consolidation (aucune tendance claire)
+            
+            **Astuce :** Mettez la confiance à 0% et relancez pour voir si des signaux existent.
+            """)
+        
         st.markdown("""
         **Suggestions :**
-        - Réduire la confiance minimale
-        - Augmenter le nombre de paires scannées
-        - Ajouter d'autres timeframes
-        - Réessayer dans quelques minutes
+        - Mettre la confiance minimale à **0%** temporairement
+        - Réessayer dans 5-10 minutes (attendre nouvelles bougies)
+        - Vérifier session de marché active
         """)
 
 else:
@@ -563,5 +620,4 @@ else:
     - 🟡 **1h-10h** : Session Tokyo (JPY uniquement)
     - 🔵 **23h-1h** : Marché calme (éviter)
     """)
-    
   
