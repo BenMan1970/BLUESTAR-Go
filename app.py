@@ -26,8 +26,8 @@ GRANULARITY_MAP = {"H1": "H1", "H4": "H4", "D1": "D", "W": "W"}
 # ----------------------
 # Interface
 # ----------------------
-st.title("📊 Forex Multi-Timeframe Scanner Pro - Signaux Instantanés")
-st.write("✨ Détection des changements HMA + croisements RSI en temps réel")
+st.title("📊 Forex Multi-Timeframe Signal Scanner Pro")
+st.write("Scanner optimisé avec analyse parallèle et calculs SL/TP automatiques")
 
 # ----------------------
 # OANDA API
@@ -50,7 +50,7 @@ except Exception as e:
 # ----------------------
 # Fonctions utilitaires
 # ----------------------
-@st.cache_data(ttl=30)  # Cache réduit à 30s pour signaux instantanés
+@st.cache_data(ttl=60)
 def get_candles(pair: str, tf: str, count: int = 200) -> pd.DataFrame:
     """Télécharge les bougies OANDA avec gestion d'erreur robuste."""
     gran = GRANULARITY_MAP.get(tf)
@@ -123,26 +123,27 @@ def atr(df: pd.DataFrame, length: int = 14) -> pd.Series:
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     return tr.ewm(alpha=1/length, adjust=False).mean()
 
-@st.cache_data(ttl=60)
+@st.cache_data(ttl=120)
 def check_mtf_trend(pair: str, tf: str) -> Dict[str, any]:
-    """Analyse tendance multi-timeframe SIMPLIFIÉE.
+    """Analyse tendance multi-timeframe avec force du signal.
     H1 → validé par H4
     H4 → validé par D1  
     D1 → validé par W
     """
+    # Mapping strict des validations MTF
     map_higher = {
-        "H1": "H4",
-        "H4": "D1",
-        "D1": "W"
+        "H1": "H4",   # H1 validé par H4
+        "H4": "D1",   # H4 validé par D1
+        "D1": "W"     # D1 validé par Weekly
     }
     
     higher = map_higher.get(tf)
     if not higher:
-        return {"trend": "neutral", "strength": 0, "aligned": False}
+        return {"trend": "neutral", "strength": 0}
     
     df = get_candles(pair, higher, count=100)
     if df.empty or len(df) < 50:
-        return {"trend": "neutral", "strength": 0, "aligned": False}
+        return {"trend": "neutral", "strength": 0}
     
     close = df["close"]
     ema20 = close.ewm(span=20, adjust=False).mean().iloc[-1]
@@ -154,23 +155,24 @@ def check_mtf_trend(pair: str, tf: str) -> Dict[str, any]:
     
     if ema20 > ema50 and price > ema20:
         strength = min(distance_pct * 10, 100)
-        return {"trend": "bullish", "strength": round(strength, 1), "aligned": True}
+        return {"trend": "bullish", "strength": round(strength, 1)}
     elif ema20 < ema50 and price < ema20:
         strength = min(distance_pct * 10, 100)
-        return {"trend": "bearish", "strength": round(strength, 1), "aligned": True}
+        return {"trend": "bearish", "strength": round(strength, 1)}
     
-    return {"trend": "neutral", "strength": 0, "aligned": False}
+    return {"trend": "neutral", "strength": 0}
 
 # ----------------------
-# Analyse INSTANTANÉE d'une paire
+# Analyse d'une paire (optimisée)
 # ----------------------
-def analyze_pair(pair: str, tf: str, candles_count: int) -> Optional[Dict]:
-    """
-    Détection INSTANTANÉE des signaux selon vos critères EXACTS :
+def analyze_pair(pair: str, tf: str, candles_count: int, max_candles_back: int = 3) -> Optional[Dict]:
+    """Analyse complète avec gestion d'erreur robuste et filtre de fraîcheur.
     
-    1. HMA20 change de couleur (rouge→vert = ACHAT, vert→rouge = VENTE)
-    2. RSI7 dépasse légèrement 50 (croisement sur les 2 dernières bougies)
-    3. MTF aligné avec timeframe supérieur
+    Args:
+        pair: Paire forex à analyser
+        tf: Timeframe (H1, H4, D1)
+        candles_count: Nombre de bougies historiques à télécharger
+        max_candles_back: Nombre max de bougies en arrière pour détecter signaux (1=dernière uniquement)
     """
     df = get_candles(pair, tf, count=candles_count)
     if df.empty or len(df) < 30:
@@ -183,103 +185,92 @@ def analyze_pair(pair: str, tf: str, candles_count: int) -> Optional[Dict]:
     df["rsi7"] = rsi(df["close"], 7)
     df["atr14"] = atr(df, 14)
     
-    # Direction HMA
+    # Signaux HMA - Direction actuelle
     df["hma_up"] = df["hma20"] > df["hma20"].shift(1)
     
-    # ============================================
-    # CRITÈRE 1 : HMA change de couleur (ou vient de changer récemment)
-    # ============================================
+    # IMPORTANT : Ne regarder que les N dernières bougies selon le paramètre
+    last_n = df.tail(max_candles_back) if max_candles_back < 999 else df.tail(3)
+    
+    # Vérifier si HMA a changé dans la fenêtre autorisée
+    hma_became_bullish = False
+    hma_became_bearish = False
+    
+    for i in range(len(last_n) - 1):
+        curr_up = last_n.iloc[i+1]["hma_up"]
+        prev_up = last_n.iloc[i]["hma_up"]
+        if curr_up and not prev_up:
+            hma_became_bullish = True
+        if not curr_up and prev_up:
+            hma_became_bearish = True
+    
     last = df.iloc[-1]
-    prev = df.iloc[-2]
-    prev2 = df.iloc[-3] if len(df) > 2 else prev
     
-    # Changement HMA sur la dernière OU avant-dernière bougie (tolérance)
-    hma_turned_bullish = (last["hma_up"] and not prev["hma_up"]) or \
-                         (prev["hma_up"] and not prev2["hma_up"] and last["hma_up"])
+    # RSI - Vérifier position actuelle
+    rsi_bullish = last["rsi7"] > 50
+    rsi_bearish = last["rsi7"] < 50
     
-    hma_turned_bearish = (not last["hma_up"] and prev["hma_up"]) or \
-                         (not prev["hma_up"] and prev2["hma_up"] and not last["hma_up"])
+    # Vérifier croisement RSI dans la fenêtre autorisée
+    rsi_crossed_up_recently = any(
+        (last_n.iloc[i]["rsi7"] > 50) and (last_n.iloc[i-1]["rsi7"] <= 50)
+        for i in range(1, len(last_n))
+    )
+    rsi_crossed_down_recently = any(
+        (last_n.iloc[i]["rsi7"] < 50) and (last_n.iloc[i-1]["rsi7"] >= 50)
+        for i in range(1, len(last_n))
+    )
     
-    # ============================================
-    # CRITÈRE 2 : RSI croise 50 (ou vient de croiser)
-    # ============================================
-    # ACHAT : RSI croise 50 vers le HAUT (au-dessus de 50)
-    # VENTE : RSI croise 50 vers le BAS (en-dessous de 50)
-    
-    # Croisement sur dernière ou avant-dernière bougie
-    rsi_crossed_up_now = (prev["rsi7"] <= 50 and last["rsi7"] > 50)
-    rsi_crossed_up_prev = (prev2["rsi7"] <= 50 and prev["rsi7"] > 50 and last["rsi7"] > 50)
-    rsi_crossed_up = rsi_crossed_up_now or rsi_crossed_up_prev
-    
-    rsi_crossed_down_now = (prev["rsi7"] >= 50 and last["rsi7"] < 50)
-    rsi_crossed_down_prev = (prev2["rsi7"] >= 50 and prev["rsi7"] < 50 and last["rsi7"] < 50)
-    rsi_crossed_down = rsi_crossed_down_now or rsi_crossed_down_prev
-    
-    # Distance au croisement (pour mesurer "légèrement")
-    rsi_distance = abs(last["rsi7"] - 50)
-    
-    # ============================================
-    # CRITÈRE 3 : MTF aligné
-    # ============================================
+    # Validation MTF
     mtf_info = check_mtf_trend(pair, tf)
-    mtf_aligned = mtf_info["aligned"]
     mtf_trend = mtf_info["trend"]
     mtf_strength = mtf_info["strength"]
     
-    # ============================================
-    # LOGIQUE DE SIGNAL INSTANTANÉ
-    # ============================================
+    # Logique de signal
+    raw_buy = (hma_became_bullish or last["hma_up"]) and rsi_bullish
+    raw_sell = (hma_became_bearish or not last["hma_up"]) and rsi_bearish
+    
+    # Bonus de confiance si croisement RSI récent
+    has_rsi_confirmation = rsi_crossed_up_recently or rsi_crossed_down_recently
+    
+    # Signaux validés avec MTF
+    buy = raw_buy and mtf_trend == "bullish"
+    sell = raw_sell and mtf_trend == "bearish"
+    
     signal = None
     confidence = 0
     
-    # SIGNAL ACHAT : HMA devient verte + RSI croise 50 vers le haut + MTF haussier
-    if hma_turned_bullish and rsi_crossed_up and mtf_trend == "bullish" and mtf_aligned:
+    if buy:
         signal = "🟢 ACHAT"
-        
-        # Confiance basée sur :
-        # - Force RSI au-dessus de 50 (max 40 points)
-        # - Force tendance MTF (max 60 points)
-        # - Bonus si croisement RSI proche de 50 (léger)
-        rsi_strength = min((last["rsi7"] - 50) * 2, 40)
-        proximity_bonus = max(0, 10 - rsi_distance) * 2  # Bonus si RSI proche de 50
-        
-        confidence = rsi_strength + (mtf_strength * 0.6) + proximity_bonus
-    
-    # SIGNAL VENTE : HMA devient rouge + RSI croise 50 vers le bas + MTF baissier
-    elif hma_turned_bearish and rsi_crossed_down and mtf_trend == "bearish" and mtf_aligned:
+        rsi_strength = (last["rsi7"] - 50) / 50 * 100
+        confidence = (rsi_strength * 0.4 + mtf_strength * 0.6)
+        if has_rsi_confirmation:
+            confidence *= 1.2
+    elif sell:
         signal = "🔴 VENTE"
-        
-        rsi_strength = min((50 - last["rsi7"]) * 2, 40)
-        proximity_bonus = max(0, 10 - rsi_distance) * 2
-        
-        confidence = rsi_strength + (mtf_strength * 0.6) + proximity_bonus
+        rsi_strength = (50 - last["rsi7"]) / 50 * 100
+        confidence = (rsi_strength * 0.4 + mtf_strength * 0.6)
+        if has_rsi_confirmation:
+            confidence *= 1.2
     
     confidence = min(confidence, 100)
     
     if signal is None:
         return None
     
-    # ============================================
     # Calcul niveaux SL/TP basés sur ATR
-    # ============================================
     atr_value = last["atr14"]
     price = last["close"]
     
-    if "ACHAT" in signal:
+    if buy:
         sl = price - (2 * atr_value)
         tp = price + (3 * atr_value)
+        risk_pips = abs(price - sl)
     else:
         sl = price + (2 * atr_value)
         tp = price - (3 * atr_value)
+        risk_pips = abs(price - sl)
     
-    risk_pips = abs(price - sl)
     reward_pips = abs(tp - price)
     rr_ratio = reward_pips / risk_pips if risk_pips > 0 else 0
-    
-    # Temps écoulé depuis le signal (en minutes)
-    now = datetime.now(pytz.UTC)
-    signal_time = last["time"].replace(tzinfo=pytz.UTC)
-    minutes_ago = (now - signal_time).total_seconds() / 60
     
     return {
         "Instrument": pair,
@@ -293,17 +284,15 @@ def analyze_pair(pair: str, tf: str, candles_count: int) -> Optional[Dict]:
         "RSI": round(last["rsi7"], 1),
         "Tendance": mtf_trend.upper(),
         "Force": f"{mtf_strength}%",
-        "Il y a": f"{int(minutes_ago)}min",
         "Heure": last["time"].strftime("%Y-%m-%d %H:%M"),
         "_confidence_val": confidence,
-        "_time_raw": last["time"],
-        "_minutes_ago": minutes_ago
+        "_time_raw": last["time"]
     }
 
 # ----------------------
 # Scan parallélisé
 # ----------------------
-def scan_parallel(pairs: List[str], tfs: List[str], candles_count: int, max_workers: int = 5) -> List[Dict]:
+def scan_parallel(pairs: List[str], tfs: List[str], candles_count: int, max_workers: int = 5, max_candles_back: int = 3) -> List[Dict]:
     """Scan parallélisé pour performances optimales."""
     results = []
     tasks = [(pair, tf) for pair in pairs for tf in tfs]
@@ -313,7 +302,7 @@ def scan_parallel(pairs: List[str], tfs: List[str], candles_count: int, max_work
     
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         future_to_task = {
-            executor.submit(analyze_pair, pair, tf, candles_count): (pair, tf)
+            executor.submit(analyze_pair, pair, tf, candles_count, max_candles_back): (pair, tf)
             for pair, tf in tasks
         }
         
@@ -338,16 +327,81 @@ def scan_parallel(pairs: List[str], tfs: List[str], candles_count: int, max_work
     return results
 
 # ----------------------
+# Interface utilisateur
+# ----------------------
+st.sidebar.header("⚙️ Configuration du Scanner")
+
+# Scanner TOUTES les 28 paires par défaut (masqué mais modifiable)
+with st.sidebar.expander("🔧 Filtrer les paires (optionnel)", expanded=False):
+    selected_pairs = st.multiselect(
+        "Désélectionner les paires à ignorer :",
+        PAIRS_DEFAULT,
+        default=PAIRS_DEFAULT
+    )
+
+# Si aucune paire sélectionnée, prendre toutes par défaut
+if not selected_pairs:
+    selected_pairs = PAIRS_DEFAULT
+
+max_pairs = len(selected_pairs)  # Scanner toutes les paires sélectionnées
+
+# Timeframes H1, H4, D1 par défaut (tous sélectionnés)
+selected_tfs = st.sidebar.multiselect(
+    "Timeframes :",
+    ["H1", "H4", "D1"],
+    default=["H1", "H4", "D1"],
+    help="H1 validé par H4 | H4 validé par D1 | D1 validé par W"
+)
+
+candles_count = st.sidebar.selectbox(
+    "Bougies par timeframe :",
+    [100, 150, 200],
+    index=1
+)
+
+max_workers = st.sidebar.slider(
+    "Threads parallèles :",
+    min_value=3,
+    max_value=10,
+    value=5,
+    help="Plus = rapide mais charge API OANDA"
+)
+
+min_confidence = st.sidebar.slider(
+    "Confiance minimale (%) :",
+    min_value=0,
+    max_value=100,
+    value=20,  # Réduit de 40% à 20% pour voir plus de signaux
+    help="Filtrer les signaux faibles - Réduire pour voir plus de signaux"
+)
+
+st.sidebar.markdown("---")
+st.sidebar.markdown("### 🔄 Rafraîchissement")
+auto_refresh = st.sidebar.checkbox("Auto-refresh (5min)", help="Scan automatique toutes les 5 minutes")
+refresh_interval = st.sidebar.selectbox("Intervalle (min) :", [3, 5, 10, 15], index=1)
+
+st.sidebar.markdown("---")
+scan_button = st.sidebar.button("🚀 LANCER LE SCAN", type="primary", use_container_width=True)
+
+# Définir max_candles_ago AVANT l'utilisation
+max_candles_ago = freshness_map.get(signal_freshness, 2)
+
+# ----------------------
 # Fonction session de marché
 # ----------------------
 def get_market_session():
     """Détermine la session de marché active et sa qualité."""
+    from datetime import datetime
+    import pytz
+    
+    # Heure actuelle à Tunis
     tz_tunis = pytz.timezone('Africa/Tunis')
     now = datetime.now(tz_tunis)
     hour = now.hour
     minute = now.minute
     current_time = hour + minute / 60
     
+    # Définition des sessions (heures de Tunis)
     sessions = {
         "Tokyo": {"start": 1, "end": 10, "quality": "🟡 Moyenne", "pairs": "JPY", "color": "orange"},
         "Londres": {"start": 9, "end": 18, "quality": "🟢 Excellente", "pairs": "EUR, GBP", "color": "green"},
@@ -359,6 +413,7 @@ def get_market_session():
     best_quality = "🔵 Faible"
     best_color = "blue"
     
+    # Vérifier les sessions actives
     for name, info in sessions.items():
         if info["start"] <= current_time < info["end"]:
             active_sessions.append(name)
@@ -385,86 +440,26 @@ def get_market_session():
     }
 
 # ----------------------
-# Interface utilisateur
-# ----------------------
-st.sidebar.header("⚙️ Configuration du Scanner")
-
-with st.sidebar.expander("🔧 Filtrer les paires (optionnel)", expanded=False):
-    selected_pairs = st.multiselect(
-        "Désélectionner les paires à ignorer :",
-        PAIRS_DEFAULT,
-        default=PAIRS_DEFAULT
-    )
-
-if not selected_pairs:
-    selected_pairs = PAIRS_DEFAULT
-
-selected_tfs = st.sidebar.multiselect(
-    "Timeframes :",
-    ["H1", "H4", "D1"],
-    default=["H1", "H4", "D1"],
-    help="H1 validé par H4 | H4 validé par D1 | D1 validé par W"
-)
-
-candles_count = st.sidebar.selectbox(
-    "Bougies par timeframe :",
-    [100, 150, 200],
-    index=1
-)
-
-max_workers = st.sidebar.slider(
-    "Threads parallèles :",
-    min_value=3,
-    max_value=10,
-    value=5,
-    help="Plus = rapide mais charge API OANDA"
-)
-
-min_confidence = st.sidebar.slider(
-    "Confiance minimale (%) :",
-    min_value=0,
-    max_value=100,
-    value=30,
-    help="Filtrer les signaux faibles"
-)
-
-# Filtre de fraîcheur des signaux
-max_age_minutes = st.sidebar.slider(
-    "Signaux récents uniquement (min) :",
-    min_value=15,
-    max_value=120,
-    value=60,
-    help="Ignorer les signaux plus vieux que X minutes"
-)
-
-st.sidebar.markdown("---")
-st.sidebar.markdown("### 🔄 Rafraîchissement")
-auto_refresh = st.sidebar.checkbox("Auto-refresh", value=True, help="Scan automatique")
-refresh_interval = st.sidebar.selectbox("Intervalle (min) :", [1, 2, 3, 5], index=2)
-
-st.sidebar.markdown("---")
-scan_button = st.sidebar.button("🚀 LANCER LE SCAN", type="primary", use_container_width=True)
-
-# ----------------------
-# Statistiques d'en-tête
+# Statistiques d'en-tête avec indicateur de session
 # ----------------------
 market_info = get_market_session()
 
+# Alerte session
 if market_info["quality"] == "🔥 Maximum":
-    st.success(f"⚡ **SESSION OPTIMALE ACTIVE** - {market_info['sessions']} - {market_info['quality']}")
+    st.success(f"⚡ **SESSION OPTIMALE ACTIVE** - {market_info['sessions']} - Qualité: {market_info['quality']}")
 elif market_info["quality"] == "🟢 Excellente":
-    st.info(f"✅ **Session active** - {market_info['sessions']} - {market_info['quality']}")
+    st.info(f"✅ **Session active** - {market_info['sessions']} - Qualité: {market_info['quality']}")
 elif market_info["quality"] == "🟡 Moyenne":
-    st.warning(f"⏰ **Session modérée** - {market_info['sessions']} - {market_info['quality']}")
+    st.warning(f"⏰ **Session modérée** - {market_info['sessions']} - Qualité: {market_info['quality']}")
 else:
-    st.error(f"💤 **Marché calme** - {market_info['quality']}")
+    st.error(f"💤 **Marché calme** - Peu de volatilité attendue - Qualité: {market_info['quality']}")
 
 col1, col2, col3, col4, col5 = st.columns(5)
-col1.metric("Paires scannées", len(selected_pairs))
-col2.metric("Timeframes", f"{len(selected_tfs)}/3")
-col3.metric("Validations", "HMA+RSI+MTF")
-col4.metric("Fraîcheur", f"< {max_age_minutes}min")
-col5.metric("Heure Tunis", market_info["hour"])
+col1.metric("Paires scannées", len(selected_pairs) if selected_pairs else 28)
+col2.metric("Timeframes", f"{len(selected_tfs) if selected_tfs else 0}/3")
+col3.metric("Validations MTF", "H1→H4 | H4→D1 | D1→W")
+col4.metric("Indicateurs", "HMA20 + RSI7 + ATR14")
+col5.metric("Heure Tunis", market_info["hour"], market_info["sessions"])
 
 st.markdown("---")
 
@@ -487,62 +482,65 @@ if scan_button or auto_refresh:
     
     with st.spinner("🔍 Scan en cours..."):
         start_time = time.time()
-        results = scan_parallel(selected_pairs, selected_tfs, candles_count, max_workers)
+        pairs_to_scan = selected_pairs  # Scanner TOUTES les paires sélectionnées
         
-        # Filtrer par confiance ET fraîcheur
-        results = [
-            r for r in results 
-            if r["_confidence_val"] >= min_confidence 
-            and r["_minutes_ago"] <= max_age_minutes
-        ]
+        results = scan_parallel(pairs_to_scan, selected_tfs, candles_count, max_workers, max_candles_ago)
+        
+        # Filtrer par confiance
+        results = [r for r in results if r["_confidence_val"] >= min_confidence]
         
         elapsed = time.time() - start_time
     
-    total_analyzed = len(selected_pairs) * len(selected_tfs)
-    st.success(f"✅ Scan terminé en **{elapsed:.1f}s** - **{total_analyzed} analyses** - **{len(results)} signaux instantanés**")
+    # Résultats avec statistiques détaillées
+    total_analyzed = len(pairs_to_scan) * len(selected_tfs)
+    freshness_text = signal_freshness.lower()
+    st.success(f"✅ Scan terminé en **{elapsed:.1f}s** - **{total_analyzed} analyses** - **{len(results)} signaux** ({freshness_text}, confiance ≥ {min_confidence}%)")
     
     if results:
-        # Tri par timeframe puis par fraîcheur
+        # Tri personnalisé : H1 -> H4 -> D1, puis par date décroissante dans chaque TF
         tf_order = {"H1": 1, "H4": 2, "D1": 3}
-        results.sort(key=lambda x: (tf_order.get(x["TF"], 99), x["_minutes_ago"]))
+        results.sort(key=lambda x: (tf_order.get(x["TF"], 99), -x["_time_raw"].timestamp()))
         
-        # Identifier le signal le plus récent PAR TIMEFRAME
+        # Identifier le signal le plus récent par timeframe
         most_recent_by_tf = {}
         for result in results:
             tf = result["TF"]
-            if tf not in most_recent_by_tf or result["_minutes_ago"] < most_recent_by_tf[tf]["_minutes_ago"]:
-                most_recent_by_tf[tf] = result
+            if tf not in most_recent_by_tf:
+                most_recent_by_tf[tf] = result["_time_raw"]
         
-        # Marqueur étoile UNIQUEMENT pour le plus récent de chaque TF
+        # Ajouter marqueur étoile pour les plus récents
         for result in results:
-            if result["Instrument"] == most_recent_by_tf[result["TF"]]["Instrument"] and \
-               result["TF"] == most_recent_by_tf[result["TF"]]["TF"]:
+            if result["_time_raw"] == most_recent_by_tf[result["TF"]]:
                 result["Signal"] = "⭐ " + result["Signal"]
         
+        # Préparation données affichage
         df_display = pd.DataFrame([
             {k: v for k, v in r.items() if not k.startswith("_")}
             for r in results
         ])
         
+        # Coloration des signaux
         def highlight_signal(row):
             if "ACHAT" in str(row["Signal"]):
-                return ['background-color: rgba(0, 255, 0, 0.15)'] * len(row)
+                return ['background-color: rgba(0, 255, 0, 0.1)'] * len(row)
             elif "VENTE" in str(row["Signal"]):
-                return ['background-color: rgba(255, 0, 0, 0.15)'] * len(row)
+                return ['background-color: rgba(255, 0, 0, 0.1)'] * len(row)
             return [''] * len(row)
         
-        st.subheader("📋 Signaux Instantanés Détectés")
+        # Affichage tableau principal
+        st.subheader("📋 Signaux détectés")
+        st.caption("⭐ = Signal le plus récent du timeframe")
         st.dataframe(
             df_display.style.apply(highlight_signal, axis=1),
             use_container_width=True,
             height=500
         )
         
-        # Top 5 signaux
+        # Top signaux
         st.markdown("---")
-        st.subheader("🏆 Top 5 Signaux Plus Récents")
+        st.subheader("🏆 Top 5 Signaux par Confiance")
         
-        cols = st.columns(min(5, len(results)))
+        cols = st.columns(5)
         for idx, result in enumerate(results[:5]):
             with cols[idx]:
                 signal_emoji = "🟢" if "ACHAT" in result["Signal"] else "🔴"
@@ -551,9 +549,22 @@ if scan_button or auto_refresh:
                     f"{result['Prix']}",
                     f"{result['TF']} - {result['Confiance']:.0f}%"
                 )
-                st.caption(f"⏱️ Il y a {result['Il y a']}")
                 st.caption(f"SL: {result['SL']} | TP: {result['TP']}")
                 st.caption(f"R:R {result['R:R']} | RSI {result['RSI']}")
+        
+        # Analyse par timeframe
+        st.markdown("---")
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.subheader("📊 Répartition par Timeframe")
+            tf_counts = df_display["TF"].value_counts()
+            st.bar_chart(tf_counts)
+        
+        with col2:
+            st.subheader("📈 Répartition Achat/Vente")
+            signal_counts = df_display["Signal"].value_counts()
+            st.bar_chart(signal_counts)
         
         # Export CSV
         st.markdown("---")
@@ -568,70 +579,62 @@ if scan_button or auto_refresh:
         )
         
     else:
-        st.info("ℹ️ Aucun signal instantané détecté pour le moment.")
+        st.info("ℹ️ Aucun signal détecté avec les critères actuels.")
         
-        with st.expander("🔍 Pourquoi aucun signal ?"):
-            st.markdown(f"""
-            **Critères STRICTS pour un signal instantané :**
+        # Mode debug pour comprendre pourquoi
+        with st.expander("🔍 Diagnostic - Pourquoi aucun signal ?"):
+            st.markdown("""
+            **Critères requis pour un signal :**
+            1. ✅ HMA20 devient haussière/baissière (ou est déjà dans cette direction)
+            2. ✅ RSI7 au-dessus/en-dessous de 50
+            3. ✅ Tendance MTF alignée (H1→H4, H4→D1, D1→W)
+            4. ✅ Confiance ≥ seuil défini
             
-            ✅ **1. HMA20 change de couleur** (dernière ou avant-dernière bougie) :
-            - Rouge → Vert = Signal ACHAT
-            - Vert → Rouge = Signal VENTE
+            **Actions à essayer :**
+            - 🔽 Réduire la **confiance minimale** à 0% (voir TOUS les signaux)
+            - 🔄 Attendre la prochaine bougie (les signaux apparaissent à la clôture)
+            - ⏰ Vérifier que vous êtes dans une session active (Londres/NY)
+            - 📊 Les marchés peuvent être en consolidation (aucune tendance claire)
             
-            ✅ **2. RSI7 croise 50** (dernière ou avant-dernière bougie) :
-            - ACHAT : RSI passe de ≤50 à >50 (au-dessus)
-            - VENTE : RSI passe de ≥50 à <50 (en-dessous)
-            
-            ✅ **3. MTF aligné** :
-            - H1 → H4 doit être haussier/baissier
-            - H4 → D1 doit être haussier/baissier
-            - D1 → W doit être haussier/baissier
-            
-            ✅ **4. Signal récent** : < {max_age_minutes} minutes
-            
-            **Actions suggérées :**
-            - 🔽 Réduire la confiance minimale à 0%
-            - ⏰ La fraîcheur est déjà à {max_age_minutes} min
-            - 🔄 Attendre la prochaine bougie (signaux apparaissent à la clôture)
-            - 📊 Vérifier que vous êtes dans une session active
-            - 🌍 Le marché peut être en consolidation (pas de tendance claire)
-            
-            **Note :** Ces signaux nécessitent l'alignement des 3 critères dans une fenêtre de 2 bougies.
+            **Astuce :** Mettez la confiance à 0% et relancez pour voir si des signaux existent.
             """)
+        
+        st.markdown("""
+        **Suggestions :**
+        - Mettre la confiance minimale à **0%** temporairement
+        - Réessayer dans 5-10 minutes (attendre nouvelles bougies)
+        - Vérifier session de marché active
+        """)
 
 else:
-    st.info("👈 Configurez le scanner et cliquez sur **LANCER LE SCAN**")
+    st.info("👈 Configurez le scanner dans la barre latérale et cliquez sur **LANCER LE SCAN**")
     
     st.markdown("---")
     st.markdown("""
-    ### 📚 Guide - Signaux Instantanés
+    ### 📚 Guide d'utilisation
     
-    **Stratégie Précise :**
+    **Stratégie :**
+    - Signal ACHAT : HMA20 devient haussière + RSI7 > 50 + tendance MTF haussière
+    - Signal VENTE : HMA20 devient baissière + RSI7 < 50 + tendance MTF baissière
     
-    🎯 **Signal ACHAT détecté quand :**
-    1. HMA20 passe du rouge au vert (sur la dernière bougie)
-    2. RSI7 croise la ligne 50 vers le HAUT (passe au-dessus de 50)
-    3. Tendance MTF haussière sur TF supérieur
+    **Niveaux :**
+    - SL calculé à 2x ATR du prix d'entrée
+    - TP calculé à 3x ATR du prix d'entrée
+    - Ratio risque/récompense ~1:1.5
     
-    🎯 **Signal VENTE détecté quand :**
-    1. HMA20 passe du vert au rouge (sur la dernière bougie)
-    2. RSI7 croise la ligne 50 vers le BAS (passe en-dessous de 50)
-    3. Tendance MTF baissière sur TF supérieur
+    **Confiance :**
+    - Score basé sur force RSI (40%) + force tendance MTF (60%)
+    - Recommandé : ≥ 40% pour signaux fiables
     
-    **Niveaux automatiques :**
-    - SL : 2x ATR
-    - TP : 3x ATR
-    - R:R : ~1:1.5
+    **Performance :**
+    - Scan parallélisé : 5-10x plus rapide que séquentiel
+    - Cache 60s pour réduire appels API
+    - Auto-refresh optionnel pour trading actif
     
-    **Confiance (score) :**
-    - 40% : Force RSI
-    - 60% : Force tendance MTF
-    - Bonus : Proximité du croisement RSI à 50
-    
-    **💡 Conseils d'utilisation :**
-    - Auto-refresh 2-3 min pour capturer les signaux en temps réel
-    - Vérifier signaux sur TradingView avant d'entrer en position
-    - Les signaux ⭐ sont les plus récents de chaque timeframe
-    - Réduire la confiance à 0% si aucun signal n'apparaît
-    - Les critères sont stricts : HMA + RSI + MTF doivent s'aligner dans une fenêtre de 2 bougies
+    **⏰ Meilleures heures de trading (Tunis) :**
+    - 🔥 **14h-18h** : Overlap Londres-NY (OPTIMAL)
+    - 🟢 **9h-18h** : Session Londres
+    - 🟢 **14h-23h** : Session New York
+    - 🟡 **1h-10h** : Session Tokyo (JPY uniquement)
+    - 🔵 **23h-1h** : Marché calme (éviter)
     """)
