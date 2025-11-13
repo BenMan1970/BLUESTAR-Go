@@ -493,8 +493,21 @@ if scan_button or auto_refresh:
     st.success(f"✅ Scan terminé en **{elapsed:.1f}s** - **{total_analyzed} analyses** - **{len(results)} signaux** (confiance ≥ {min_confidence}%)")
     
     if results:
-        # Tri par confiance décroissante
-        results.sort(key=lambda x: x["_confidence_val"], reverse=True)
+        # Tri personnalisé : H1 -> H4 -> D1, puis par date décroissante dans chaque TF
+        tf_order = {"H1": 1, "H4": 2, "D1": 3}
+        results.sort(key=lambda x: (tf_order.get(x["TF"], 99), -x["_time_raw"].timestamp()))
+        
+        # Identifier le signal le plus récent par timeframe
+        most_recent_by_tf = {}
+        for result in results:
+            tf = result["TF"]
+            if tf not in most_recent_by_tf:
+                most_recent_by_tf[tf] = result["_time_raw"]
+        
+        # Ajouter marqueur étoile pour les plus récents
+        for result in results:
+            if result["_time_raw"] == most_recent_by_tf[result["TF"]]:
+                result["Signal"] = "⭐ " + result["Signal"]
         
         # Préparation données affichage
         df_display = pd.DataFrame([
@@ -512,6 +525,7 @@ if scan_button or auto_refresh:
         
         # Affichage tableau principal
         st.subheader("📋 Signaux détectés")
+        st.caption("⭐ = Signal le plus récent du timeframe")
         st.dataframe(
             df_display.style.apply(highlight_signal, axis=1),
             use_container_width=True,
@@ -620,4 +634,4 @@ else:
     - 🟡 **1h-10h** : Session Tokyo (JPY uniquement)
     - 🔵 **23h-1h** : Marché calme (éviter)
     """)
-  
+    
