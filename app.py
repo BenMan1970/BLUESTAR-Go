@@ -471,6 +471,15 @@ if scan_button or auto_refresh:
         st.error("⚠️ Veuillez sélectionner au moins une paire et un timeframe")
         st.stop()
     
+    # Convertir la fraîcheur en nombre de bougies
+    freshness_map = {
+        "Dernière bougie uniquement": 1,
+        "2 dernières bougies": 2,
+        "3 dernières bougies": 3,
+        "Toutes les bougies": 999
+    }
+    max_candles_ago = freshness_map.get(signal_freshness, 2)
+    
     if auto_refresh and not scan_button:
         countdown = st.empty()
         for remaining in range(refresh_interval * 60, 0, -1):
