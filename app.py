@@ -50,9 +50,13 @@ except Exception as e:
 # ----------------------
 # Fonctions utilitaires
 # ----------------------
-@st.cache_data(ttl=60)
-def get_candles(pair: str, tf: str, count: int = 200) -> pd.DataFrame:
-    """Télécharge les bougies OANDA avec gestion d'erreur robuste."""
+@st.cache_data(ttl=30)
+def get_candles(pair: str, tf: str, count: int = 200, include_incomplete: bool = False) -> pd.DataFrame:
+    """Télécharge les bougies OANDA avec gestion d'erreur robuste.
+    
+    Args:
+        include_incomplete: Si True, inclut la dernière bougie même si incomplete (pour analyse en temps réel)
+    """
     gran = GRANULARITY_MAP.get(tf)
     if gran is None:
         return pd.DataFrame()
@@ -65,7 +69,8 @@ def get_candles(pair: str, tf: str, count: int = 200) -> pd.DataFrame:
         
         records = []
         for c in candles:
-            if not c.get("complete", True):
+            # Si include_incomplete=True, garder aussi la dernière bougie incomplete
+            if not c.get("complete", True) and not include_incomplete:
                 continue
             try:
                 records.append({
@@ -74,7 +79,8 @@ def get_candles(pair: str, tf: str, count: int = 200) -> pd.DataFrame:
                     "high": float(c["mid"]["h"]),
                     "low": float(c["mid"]["l"]),
                     "close": float(c["mid"]["c"]),
-                    "volume": int(c.get("volume", 0))
+                    "volume": int(c.get("volume", 0)),
+                    "complete": c.get("complete", True)
                 })
             except (KeyError, ValueError):
                 continue
@@ -123,7 +129,7 @@ def atr(df: pd.DataFrame, length: int = 14) -> pd.Series:
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     return tr.ewm(alpha=1/length, adjust=False).mean()
 
-@st.cache_data(ttl=120)
+@st.cache_data(ttl=30)
 def check_mtf_trend(pair: str, tf: str) -> Dict[str, any]:
     """Analyse tendance multi-timeframe avec force du signal."""
     map_higher = {
@@ -190,6 +196,9 @@ def analyze_pair(pair: str, tf: str, candles_count: int, max_candles_back: int =
     
     last = df.iloc[-1]
     
+    # Indicateur si la bougie est en cours ou complète
+    is_incomplete = not last.get("complete", True) if "complete" in last else False
+    
     rsi_bullish = last["rsi7"] > 50
     rsi_bearish = last["rsi7"] < 50
     
@@ -253,7 +262,7 @@ def analyze_pair(pair: str, tf: str, candles_count: int, max_candles_back: int =
     return {
         "Instrument": pair,
         "TF": tf,
-        "Signal": signal,
+        "Signal": signal + (" 🔄" if is_incomplete else ""),
         "Confiance": round(confidence, 1),
         "Prix": round(price, 5),
         "SL": round(sl, 5),
@@ -262,15 +271,16 @@ def analyze_pair(pair: str, tf: str, candles_count: int, max_candles_back: int =
         "RSI": round(last["rsi7"], 1),
         "Tendance": mtf_trend.upper(),
         "Force": f"{mtf_strength}%",
-        "Heure": last["time"].strftime("%Y-%m-%d %H:%M"),
+        "Heure": last["time"].strftime("%Y-%m-%d %H:%M") + (" ⏳" if is_incomplete else ""),
         "_confidence_val": confidence,
-        "_time_raw": last["time"]
+        "_time_raw": last["time"],
+        "_incomplete": is_incomplete
     }
 
 # ----------------------
 # Scan parallélisé
 # ----------------------
-def scan_parallel(pairs: List[str], tfs: List[str], candles_count: int, max_workers: int = 5, max_candles_back: int = 3) -> List[Dict]:
+def scan_parallel(pairs: List[str], tfs: List[str], candles_count: int, max_workers: int = 5, max_candles_back: int = 3, include_incomplete: bool = False) -> List[Dict]:
     """Scan parallélisé pour performances optimales."""
     results = []
     tasks = [(pair, tf) for pair in pairs for tf in tfs]
@@ -280,7 +290,7 @@ def scan_parallel(pairs: List[str], tfs: List[str], candles_count: int, max_work
     
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         future_to_task = {
-            executor.submit(analyze_pair, pair, tf, candles_count, max_candles_back): (pair, tf)
+            executor.submit(analyze_pair, pair, tf, candles_count, max_candles_back, include_incomplete): (pair, tf)
             for pair, tf in tasks
         }
         
@@ -396,6 +406,17 @@ min_confidence = st.sidebar.slider(
 )
 
 st.sidebar.markdown("---")
+st.sidebar.markdown("### ⚡ Mode de scan")
+
+scan_mode = st.sidebar.radio(
+    "Type de bougies :",
+    ["Bougies complètes uniquement (recommandé)", "Inclure bougie en cours (temps réel)"],
+    help="Bougies complètes = signaux fiables mais avec délai. Temps réel = signaux instantanés mais peuvent changer"
+)
+
+include_incomplete = (scan_mode == "Inclure bougie en cours (temps réel)")
+
+st.sidebar.markdown("---")
 st.sidebar.markdown("### ⏱️ Fraîcheur des signaux")
 
 signal_freshness = st.sidebar.selectbox(
@@ -465,7 +486,7 @@ if scan_button or auto_refresh:
         start_time = time.time()
         pairs_to_scan = selected_pairs
         
-        results = scan_parallel(pairs_to_scan, selected_tfs, candles_count, max_workers, max_candles_ago)
+        results = scan_parallel(pairs_to_scan, selected_tfs, candles_count, max_workers, max_candles_ago, include_incomplete)
         
         results = [r for r in results if r["_confidence_val"] >= min_confidence]
         
@@ -473,9 +494,15 @@ if scan_button or auto_refresh:
     
     total_analyzed = len(pairs_to_scan) * len(selected_tfs)
     freshness_text = signal_freshness.lower()
-    st.success(f"✅ Scan terminé en **{elapsed:.1f}s** - **{total_analyzed} analyses** - **{len(results)} signaux** ({freshness_text}, confiance ≥ {min_confidence}%)")
+    
+    mode_text = "temps réel 🔄" if include_incomplete else "bougies complètes"
+    st.success(f"✅ Scan terminé en **{elapsed:.1f}s** - **{total_analyzed} analyses** - **{len(results)} signaux** ({mode_text}, {freshness_text}, confiance ≥ {min_confidence}%)")
     
     if results:
+        # Avertissement si mode temps réel activé
+        if include_incomplete:
+            st.warning("⚠️ **Mode temps réel activé** : Les signaux avec 🔄 sont basés sur la bougie en cours et peuvent changer avant la clôture !")
+        
         # Séparer les résultats par timeframe
         results_by_tf = {}
         for result in results:
@@ -620,4 +647,7 @@ else:
     - 🔵 **23h-1h** : Marché calme (éviter)
     
     **⭐ = Signal le plus récent du timeframe**
+    **🔄 = Signal basé sur bougie en cours (mode temps réel)**
+    **⏳ = Heure de la bougie en cours**
     """)
+   
