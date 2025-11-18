@@ -125,16 +125,11 @@ def atr(df: pd.DataFrame, length: int = 14) -> pd.Series:
 
 @st.cache_data(ttl=120)
 def check_mtf_trend(pair: str, tf: str) -> Dict[str, any]:
-    """Analyse tendance multi-timeframe avec force du signal.
-    H1 → validé par H4
-    H4 → validé par D1  
-    D1 → validé par W
-    """
-    # Mapping strict des validations MTF
+    """Analyse tendance multi-timeframe avec force du signal."""
     map_higher = {
-        "H1": "H4",   # H1 validé par H4
-        "H4": "D1",   # H4 validé par D1
-        "D1": "W"     # D1 validé par Weekly
+        "H1": "H4",
+        "H4": "D1",
+        "D1": "W"
     }
     
     higher = map_higher.get(tf)
@@ -150,7 +145,6 @@ def check_mtf_trend(pair: str, tf: str) -> Dict[str, any]:
     ema50 = close.ewm(span=50, adjust=False).mean().iloc[-1]
     price = close.iloc[-1]
     
-    # Calcul de la force de la tendance
     distance_pct = abs((ema20 - ema50) / ema50) * 100
     
     if ema20 > ema50 and price > ema20:
@@ -166,14 +160,7 @@ def check_mtf_trend(pair: str, tf: str) -> Dict[str, any]:
 # Analyse d'une paire (optimisée)
 # ----------------------
 def analyze_pair(pair: str, tf: str, candles_count: int, max_candles_back: int = 3) -> Optional[Dict]:
-    """Analyse complète avec gestion d'erreur robuste et filtre de fraîcheur.
-    
-    Args:
-        pair: Paire forex à analyser
-        tf: Timeframe (H1, H4, D1)
-        candles_count: Nombre de bougies historiques à télécharger
-        max_candles_back: Nombre max de bougies en arrière pour détecter signaux (1=dernière uniquement)
-    """
+    """Analyse complète avec gestion d'erreur robuste et filtre de fraîcheur."""
     df = get_candles(pair, tf, count=candles_count)
     if df.empty or len(df) < 30:
         return None
@@ -188,10 +175,8 @@ def analyze_pair(pair: str, tf: str, candles_count: int, max_candles_back: int =
     # Signaux HMA - Direction actuelle
     df["hma_up"] = df["hma20"] > df["hma20"].shift(1)
     
-    # IMPORTANT : Ne regarder que les N dernières bougies selon le paramètre
     last_n = df.tail(max_candles_back) if max_candles_back < 999 else df.tail(3)
     
-    # Vérifier si HMA a changé dans la fenêtre autorisée
     hma_became_bullish = False
     hma_became_bearish = False
     
@@ -205,11 +190,9 @@ def analyze_pair(pair: str, tf: str, candles_count: int, max_candles_back: int =
     
     last = df.iloc[-1]
     
-    # RSI - Vérifier position actuelle
     rsi_bullish = last["rsi7"] > 50
     rsi_bearish = last["rsi7"] < 50
     
-    # Vérifier croisement RSI dans la fenêtre autorisée
     rsi_crossed_up_recently = any(
         (last_n.iloc[i]["rsi7"] > 50) and (last_n.iloc[i-1]["rsi7"] <= 50)
         for i in range(1, len(last_n))
@@ -219,19 +202,15 @@ def analyze_pair(pair: str, tf: str, candles_count: int, max_candles_back: int =
         for i in range(1, len(last_n))
     )
     
-    # Validation MTF
     mtf_info = check_mtf_trend(pair, tf)
     mtf_trend = mtf_info["trend"]
     mtf_strength = mtf_info["strength"]
     
-    # Logique de signal
     raw_buy = (hma_became_bullish or last["hma_up"]) and rsi_bullish
     raw_sell = (hma_became_bearish or not last["hma_up"]) and rsi_bearish
     
-    # Bonus de confiance si croisement RSI récent
     has_rsi_confirmation = rsi_crossed_up_recently or rsi_crossed_down_recently
     
-    # Signaux validés avec MTF
     buy = raw_buy and mtf_trend == "bullish"
     sell = raw_sell and mtf_trend == "bearish"
     
@@ -256,7 +235,6 @@ def analyze_pair(pair: str, tf: str, candles_count: int, max_candles_back: int =
     if signal is None:
         return None
     
-    # Calcul niveaux SL/TP basés sur ATR
     atr_value = last["atr14"]
     price = last["close"]
     
@@ -331,17 +309,12 @@ def scan_parallel(pairs: List[str], tfs: List[str], candles_count: int, max_work
 # ----------------------
 def get_market_session():
     """Détermine la session de marché active et sa qualité."""
-    from datetime import datetime
-    import pytz
-    
-    # Heure actuelle à Tunis
     tz_tunis = pytz.timezone('Africa/Tunis')
     now = datetime.now(tz_tunis)
     hour = now.hour
     minute = now.minute
     current_time = hour + minute / 60
     
-    # Définition des sessions (heures de Tunis)
     sessions = {
         "Tokyo": {"start": 1, "end": 10, "quality": "🟡 Moyenne", "pairs": "JPY", "color": "orange"},
         "Londres": {"start": 9, "end": 18, "quality": "🟢 Excellente", "pairs": "EUR, GBP", "color": "green"},
@@ -353,7 +326,6 @@ def get_market_session():
     best_quality = "🔵 Faible"
     best_color = "blue"
     
-    # Vérifier les sessions actives
     for name, info in sessions.items():
         if info["start"] <= current_time < info["end"]:
             active_sessions.append(name)
@@ -384,7 +356,6 @@ def get_market_session():
 # ----------------------
 st.sidebar.header("⚙️ Configuration du Scanner")
 
-# Scanner TOUTES les 28 paires par défaut (masqué mais modifiable)
 with st.sidebar.expander("🔧 Filtrer les paires (optionnel)", expanded=False):
     selected_pairs = st.multiselect(
         "Désélectionner les paires à ignorer :",
@@ -392,11 +363,9 @@ with st.sidebar.expander("🔧 Filtrer les paires (optionnel)", expanded=False):
         default=PAIRS_DEFAULT
     )
 
-# Si aucune paire sélectionnée, prendre toutes par défaut
 if not selected_pairs:
     selected_pairs = PAIRS_DEFAULT
 
-# Timeframes H1, H4, D1 par défaut (tous sélectionnés)
 selected_tfs = st.sidebar.multiselect(
     "Timeframes :",
     ["H1", "H4", "D1"],
@@ -445,11 +414,10 @@ st.sidebar.markdown("---")
 scan_button = st.sidebar.button("🚀 LANCER LE SCAN", type="primary", use_container_width=True)
 
 # ----------------------
-# Statistiques d'en-tête avec indicateur de session
+# Statistiques d'en-tête
 # ----------------------
 market_info = get_market_session()
 
-# Alerte session
 if market_info["quality"] == "🔥 Maximum":
     st.success(f"⚡ **SESSION OPTIMALE ACTIVE** - {market_info['sessions']} - Qualité: {market_info['quality']}")
 elif market_info["quality"] == "🟢 Excellente":
@@ -476,7 +444,6 @@ if scan_button or auto_refresh:
         st.error("⚠️ Veuillez sélectionner au moins une paire et un timeframe")
         st.stop()
     
-    # Convertir la fraîcheur en nombre de bougies
     freshness_map = {
         "Dernière bougie uniquement": 1,
         "2 dernières bougies": 2,
@@ -500,65 +467,72 @@ if scan_button or auto_refresh:
         
         results = scan_parallel(pairs_to_scan, selected_tfs, candles_count, max_workers, max_candles_ago)
         
-        # Filtrer par confiance
         results = [r for r in results if r["_confidence_val"] >= min_confidence]
         
         elapsed = time.time() - start_time
     
-    # Résultats avec statistiques détaillées
     total_analyzed = len(pairs_to_scan) * len(selected_tfs)
     freshness_text = signal_freshness.lower()
     st.success(f"✅ Scan terminé en **{elapsed:.1f}s** - **{total_analyzed} analyses** - **{len(results)} signaux** ({freshness_text}, confiance ≥ {min_confidence}%)")
     
     if results:
-        # Tri personnalisé : H1 -> H4 -> D1, puis par date décroissante dans chaque TF
-        tf_order = {"H1": 1, "H4": 2, "D1": 3}
-        results.sort(key=lambda x: (tf_order.get(x["TF"], 99), -x["_time_raw"].timestamp()))
-        
-        # Identifier le signal le plus récent par timeframe
-        most_recent_by_tf = {}
+        # Séparer les résultats par timeframe
+        results_by_tf = {}
         for result in results:
             tf = result["TF"]
-            if tf not in most_recent_by_tf:
-                most_recent_by_tf[tf] = result["_time_raw"]
+            if tf not in results_by_tf:
+                results_by_tf[tf] = []
+            results_by_tf[tf].append(result)
         
-        # Ajouter marqueur étoile pour les plus récents
-        for result in results:
-            if result["_time_raw"] == most_recent_by_tf[result["TF"]]:
-                result["Signal"] = "⭐ " + result["Signal"]
+        # Afficher un tableau par timeframe
+        tf_order = ["H1", "H4", "D1"]
         
-        # Préparation données affichage
-        df_display = pd.DataFrame([
-            {k: v for k, v in r.items() if not k.startswith("_")}
-            for r in results
-        ])
+        for tf in tf_order:
+            if tf not in results_by_tf:
+                continue
+                
+            tf_results = results_by_tf[tf]
+            
+            # Trier par confiance décroissante
+            tf_results.sort(key=lambda x: x["_confidence_val"], reverse=True)
+            
+            # Marquer le plus récent
+            most_recent_time = max(r["_time_raw"] for r in tf_results)
+            for result in tf_results:
+                if result["_time_raw"] == most_recent_time:
+                    result["Signal"] = "⭐ " + result["Signal"]
+            
+            # Créer le dataframe pour ce timeframe
+            df_tf = pd.DataFrame([
+                {k: v for k, v in r.items() if not k.startswith("_")}
+                for r in tf_results
+            ])
+            
+            # Affichage du tableau
+            st.markdown(f"### 📊 Timeframe {tf} - {len(tf_results)} signal(s)")
+            
+            def highlight_signal(row):
+                if "ACHAT" in str(row["Signal"]):
+                    return ['background-color: rgba(0, 255, 0, 0.15)'] * len(row)
+                elif "VENTE" in str(row["Signal"]):
+                    return ['background-color: rgba(255, 0, 0, 0.15)'] * len(row)
+                return [''] * len(row)
+            
+            st.dataframe(
+                df_tf.style.apply(highlight_signal, axis=1),
+                use_container_width=True,
+                hide_index=True
+            )
+            
+            st.markdown("---")
         
-        # Coloration des signaux
-        def highlight_signal(row):
-            if "ACHAT" in str(row["Signal"]):
-                return ['background-color: rgba(0, 255, 0, 0.1)'] * len(row)
-            elif "VENTE" in str(row["Signal"]):
-                return ['background-color: rgba(255, 0, 0, 0.1)'] * len(row)
-            return [''] * len(row)
+        # Top 5 signaux globaux
+        st.subheader("🏆 Top 5 Signaux par Confiance (tous TF)")
         
-        # Affichage tableau principal
-        st.subheader("📋 Signaux détectés")
-        st.caption("⭐ = Signal le plus récent du timeframe")
-        st.dataframe(
-            df_display.style.apply(highlight_signal, axis=1),
-            use_container_width=True,
-            height=500
-        )
+        results_sorted = sorted(results, key=lambda x: x["_confidence_val"], reverse=True)
         
-        # Top signaux
-        st.markdown("---")
-        st.subheader("🏆 Top 5 Signaux par Confiance")
-        
-        # Trier par confiance pour le top 5
-        results_by_conf = sorted(results, key=lambda x: x["_confidence_val"], reverse=True)
-        
-        cols = st.columns(5)
-        for idx, result in enumerate(results_by_conf[:5]):
+        cols = st.columns(min(5, len(results_sorted)))
+        for idx, result in enumerate(results_sorted[:5]):
             with cols[idx]:
                 signal_emoji = "🟢" if "ACHAT" in result["Signal"] else "🔴"
                 st.metric(
@@ -569,28 +543,31 @@ if scan_button or auto_refresh:
                 st.caption(f"SL: {result['SL']} | TP: {result['TP']}")
                 st.caption(f"R:R {result['R:R']} | RSI {result['RSI']}")
         
-        # Analyse par timeframe
+        # Statistiques
         st.markdown("---")
         col1, col2 = st.columns(2)
         
         with col1:
             st.subheader("📊 Répartition par Timeframe")
-            tf_counts = df_display["TF"].value_counts()
+            tf_counts = pd.Series({tf: len(results_by_tf.get(tf, [])) for tf in tf_order})
             st.bar_chart(tf_counts)
         
         with col2:
             st.subheader("📈 Répartition Achat/Vente")
-            # Nettoyer les étoiles pour le comptage
-            signal_clean = df_display["Signal"].str.replace("⭐ ", "")
-            signal_counts = signal_clean.value_counts()
+            all_signals = [r["Signal"].replace("⭐ ", "") for r in results]
+            signal_counts = pd.Series(all_signals).value_counts()
             st.bar_chart(signal_counts)
         
         # Export CSV
         st.markdown("---")
-        csv = df_display.to_csv(index=False).encode('utf-8')
+        df_all = pd.DataFrame([
+            {k: v for k, v in r.items() if not k.startswith("_")}
+            for r in results
+        ])
+        csv = df_all.to_csv(index=False).encode('utf-8')
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         st.download_button(
-            label="📥 Télécharger les signaux (CSV)",
+            label="📥 Télécharger tous les signaux (CSV)",
             data=csv,
             file_name=f"forex_signals_{timestamp}.csv",
             mime="text/csv",
@@ -600,7 +577,6 @@ if scan_button or auto_refresh:
     else:
         st.info("ℹ️ Aucun signal détecté avec les critères actuels.")
         
-        # Mode debug pour comprendre pourquoi
         with st.expander("🔍 Diagnostic - Pourquoi aucun signal ?"):
             st.markdown("""
             **Critères requis pour un signal :**
@@ -614,16 +590,7 @@ if scan_button or auto_refresh:
             - 🔄 Attendre la prochaine bougie (les signaux apparaissent à la clôture)
             - ⏰ Vérifier que vous êtes dans une session active (Londres/NY)
             - 📊 Les marchés peuvent être en consolidation (aucune tendance claire)
-            
-            **Astuce :** Mettez la confiance à 0% et relancez pour voir si des signaux existent.
             """)
-        
-        st.markdown("""
-        **Suggestions :**
-        - Mettre la confiance minimale à **0%** temporairement
-        - Réessayer dans 5-10 minutes (attendre nouvelles bougies)
-        - Vérifier session de marché active
-        """)
 
 else:
     st.info("👈 Configurez le scanner dans la barre latérale et cliquez sur **LANCER LE SCAN**")
@@ -645,11 +612,6 @@ else:
     - Score basé sur force RSI (40%) + force tendance MTF (60%)
     - Recommandé : ≥ 20% pour signaux fiables
     
-    **Performance :**
-    - Scan parallélisé : 5-10x plus rapide que séquentiel
-    - Cache 60s pour réduire appels API
-    - Auto-refresh optionnel pour trading actif
-    
     **⏰ Meilleures heures de trading (Tunis) :**
     - 🔥 **14h-18h** : Overlap Londres-NY (OPTIMAL)
     - 🟢 **9h-18h** : Session Londres
@@ -657,9 +619,5 @@ else:
     - 🟡 **1h-10h** : Session Tokyo (JPY uniquement)
     - 🔵 **23h-1h** : Marché calme (éviter)
     
-    **⏱️ Fraîcheur des signaux :**
-    - **Dernière bougie** : Signaux ultra-frais uniquement
-    - **2 dernières bougies** : Équilibre fraîcheur/opportunités (recommandé)
-    - **3 dernières bougies** : Plus tolérant
-    - **Toutes les bougies** : Voir l'historique complet
+    **⭐ = Signal le plus récent du timeframe**
     """)
