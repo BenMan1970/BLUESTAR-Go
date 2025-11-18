@@ -188,6 +188,4 @@ def analyze_pair(pair: str, tf: str, candles_count: int, max_candles_back: int =
         signal = "🟢 ACHAT"
         rsi_strength = (last["rsi7"] - 50) / 50 * 100
         confidence = (rsi_strength * 0.4 + mtf_strength * 0.6)
-        if has
-
-    
+                if has_rsi_confirmation:
